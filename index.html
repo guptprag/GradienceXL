@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>College ChatBot - Google Sheets Integration</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="chatbot-container">
+        <!-- Header -->
+        <header class="chatbot-header">
+            <div class="header-content">
+                <div class="header-icon">🎓</div>
+                <h1>College ChatBot</h1>
+                <div class="header-controls">
+                    <div class="api-status" id="apiStatus">
+                        <div class="status-dot"></div>
+                        <span id="statusText">Connecting...</span>
+                    </div>
+                    <button class="refresh-btn" id="refreshBtn" title="Refresh Data">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="23 4 23 10 17 10"></polyline>
+                            <polyline points="1 20 1 14 7 14"></polyline>
+                            <path d="m20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"></path>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+            <div class="cache-info" id="cacheInfo">
+                <span class="cache-status">Data cached • Last updated: <span id="lastUpdated">--</span></span>
+            </div>
+        </header>
+
+        <!-- Chat Messages Area -->
+        <div class="chat-messages" id="chatMessages">
+            <div class="message bot-message">
+                <div class="message-avatar">🤖</div>
+                <div class="message-content">
+                    <div class="message-bubble">
+                        <p>Welcome to the College ChatBot! 👋</p>
+                        <p>I can help you with real-time data from Google Sheets. Use the quick shortcuts below or type your questions naturally:</p>
+                        <ul>
+                            <li>📅 <strong>Timetable:</strong> Click the button or ask "Show timetable for 21CS001"</li>
+                            <li>📊 <strong>Attendance:</strong> Click the button or ask "Show attendance for 21CS001"</li>
+                            <li>🍽️ <strong>Mess Menu:</strong> Click the button or ask "What's today's menu?"</li>
+                            <li>🎉 <strong>Events:</strong> Click the button or ask "What are upcoming events?"</li>
+                            <li>📞 <strong>Contacts:</strong> Click the button or ask "Show contacts"</li>
+                            <li>📚 <strong>Subjects:</strong> Click the button or ask "What subjects does 21CS001 have?"</li>
+                        </ul>
+                        <p>All data is fetched live from Google Sheets and cached for better performance!</p>
+                        <p>Type "help" anytime for more information!</p>
+                    </div>
+                    <div class="message-time">Just now</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Quick Shortcut Buttons -->
+        <div class="quick-shortcuts">
+            <h3>Quick Access:</h3>
+            <div class="shortcuts-grid">
+                <button class="shortcut-btn" data-action="timetable" data-needs-roll="true">
+                    <span class="btn-icon">📅</span>
+                    <span class="btn-text">Timetable</span>
+                </button>
+                <button class="shortcut-btn" data-action="attendance" data-needs-roll="true">
+                    <span class="btn-icon">📊</span>
+                    <span class="btn-text">Attendance</span>
+                </button>
+                <button class="shortcut-btn" data-action="mess_menu" data-needs-roll="false">
+                    <span class="btn-icon">🍽️</span>
+                    <span class="btn-text">Mess Menu</span>
+                </button>
+                <button class="shortcut-btn" data-action="events" data-needs-roll="false">
+                    <span class="btn-icon">🎉</span>
+                    <span class="btn-text">Events</span>
+                </button>
+                <button class="shortcut-btn" data-action="contacts" data-needs-roll="false">
+                    <span class="btn-icon">📞</span>
+                    <span class="btn-text">Contacts</span>
+                </button>
+                <button class="shortcut-btn" data-action="subjects" data-needs-roll="false">
+                    <span class="btn-icon">📚</span>
+                    <span class="btn-text">Subjects</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Input Area -->
+        <div class="chat-input-container">
+            <div class="typing-indicator" id="typingIndicator">
+                <div class="typing-dots">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                </div>
+                <span>ChatBot is typing...</span>
+            </div>
+            <div class="chat-input">
+                <input 
+                    type="text" 
+                    id="messageInput" 
+                    placeholder="Type your message here..." 
+                    class="form-control"
+                    autocomplete="off"
+                >
+                <button id="sendButton" class="btn btn--primary send-btn">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="22" y1="2" x2="11" y2="13"></line>
+                        <polygon points="22,2 15,22 11,13 2,9"></polygon>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div class="loading-overlay hidden" id="loadingOverlay">
+        <div class="loading-spinner">
+            <div class="spinner"></div>
+            <p>Fetching data from Google Sheets...</p>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
