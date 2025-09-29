@@ -1085,6 +1085,34 @@ class CollegeChatbot {
         }
     }
 
+    restartChatbot() {
+        console.log('[Chatbot] restartChatbot start');
+                 // 1) Reset conversation state
+        conversationState = {
+            waitingFor: null,
+            pendingAction: null,
+            lastRollNumber: null
+        };
+                 // 2) Clear cache
+        this.cache?.clear();
+                 // 3) Reset input placeholder/value
+        if (this.elements?.messageInput) {
+            this.elements.messageInput.value = '';
+            this.elements.messageInput.placeholder = 'Type your message here.';
+        }
+                 // 4) Clear chat messages
+        if (this.elements?.chatMessages) {
+           this.elements.chatMessages.innerHTML = '';
+        }
+                 // 5) Refresh status widgets (keeps status dot/text consistent)
+        this.updateConnectionStatus();
+        this.updateCacheInfo?.();
+        console.log('[Chatbot] restartChatbot end');
+        // This text will be added by executeAction after the clearing is done
+        return '🔄 Chat reset. You can use the buttons below or type "help".';
+    }
+
+    
     getErrorMessage(error) {
         console.log('[Chatbot] getErrorMessage', { message: error?.message });
         const baseMessage = '❌ <strong>Error:</strong> ';
@@ -1180,4 +1208,5 @@ class CollegeChatbot {
     }
     console.log('[Bootstrap] IIFE end');
 })();
+
 
