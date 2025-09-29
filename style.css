@@ -999,7 +999,7 @@ select.form-control {
 
 .shortcut-btn .btn-icon {
     font-size: var(--font-size-3xl);
-    margin-bottom: var(--space-8);
+    margin-bottom: var(--space-4);
     transition: transform var(--duration-fast) var(--ease-standard);
 }
 
@@ -1071,6 +1071,11 @@ select.form-control {
     gap: var(--space-8);
     overflow-x: auto;
     flex-wrap: wrap;
+}
+
+.shortcut-btn {
+  min-height: 60px;             /* smaller than current mobile value */
+  padding: var(--space-8);      /* tighter internal spacing */
 }
 
 .quick-btn {
@@ -1373,8 +1378,8 @@ select.form-control {
     }
 
     .shortcut-btn {
-        min-height: 70px;
-        padding: var(--space-12) var(--space-8);
+        min-height: 55px;
+        padding: var(--space-8) var(--space-6);
     }
 
     .shortcut-btn .btn-icon {
