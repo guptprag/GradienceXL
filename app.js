@@ -271,6 +271,10 @@ class CollegeChatbot {
                     console.log('[Chatbot] executeAction -> subjects');
                     response = await this.handleSubjectsQuery(rollNumber ? `show subjects for ${rollNumber}` : 'show subjects');
                     break;
+                case 'restart':
+                    console.log('[Chatbot] executeAction -> restart');
+                    response = this.restartChatbot();
+                    break;
                 default:
                     console.log('[Chatbot] executeAction -> unknown action');
                     response = 'Unknown action. Please try again.';
@@ -1176,3 +1180,4 @@ class CollegeChatbot {
     }
     console.log('[Bootstrap] IIFE end');
 })();
+
