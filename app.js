@@ -6,7 +6,7 @@ class CollegeAssistant {
         this.sheets = {
             timetable: 'timetable',
             attendance: 'attendance',
-            messmenu: 'messmenu',
+            messmenu: 'mess_menu',
             events: 'events',
             contacts: 'contacts',
             subjects: 'subjects'
