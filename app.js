@@ -108,17 +108,25 @@ class CollegeAssistant {
         const normalizedQuery = this.normalizeQuery(query);
         
         // Check if user is providing just a roll number (automatic detection)
-        const rollNumberOnly = this.detectRollNumber(query.trim());
-        if (rollNumberOnly) {
-            this.userRollNumber = rollNumberOnly;
-            return `Got it! I've saved your roll number as ${this.userRollNumber}. Now I can help with your personal queries like timetable, attendance, and more!`;
+        const rollNumberResult = this.detectRollNumber(query.trim());
+        if (query.trim().toUpperCase().startsWith('B2')) {
+            if (rollNumberResult.isValid) {
+                this.userRollNumber = rollNumberResult.rollNumber;
+                return `Got it! I've saved your roll number as ${this.userRollNumber}. Now I can help with your personal queries like timetable, attendance, and more!`;
+            } else {
+                return rollNumberResult.message;
+            }
         }
         
         // Check if user is providing roll number with text
         const rollNumberMatch = query.match(/(?:my roll number is|roll number|roll no\.?)\s*([A-Z]+\d+)/i);
         if (rollNumberMatch) {
-            this.userRollNumber = rollNumberMatch[1].toUpperCase();
-            return `Great! I've saved your roll number as ${this.userRollNumber}. Now I can help you with personalized information like your timetable and attendance.`;
+            const validatedRoll = this.detectRollNumber(rollNumberMatch[1]);
+            if (validatedRoll) {
+                this.userRollNumber = validatedRoll;
+                return `Great! I've saved your roll number as ${this.userRollNumber}. Now I can help you with personalized information like your timetable and attendance.`;
+            }
+            return `That roll number format is invalid. Please use the format B2ABCD where A is 4 or 5, B is 0-4, and CD are any digits (00-99). For example: B24002, B25133, etc. Note that B2A000 is not valid.`;
         }
         
         // Handle greetings
@@ -156,11 +164,39 @@ class CollegeAssistant {
         return this.getDefaultResponse(query);
     }
 
-    // Enhanced roll number detection for standalone input
+    // Enhanced roll number detection and validation for standalone input
     detectRollNumber(text) {
-        const rollPattern = /^[A-Z]+\d+$/i;
-        const trimmed = text.trim();
-        return rollPattern.test(trimmed) ? trimmed.toUpperCase() : null;
+        const trimmed = text.trim().toUpperCase();
+        // First check if it starts with B2
+        if (!trimmed.startsWith('B2')) {
+            return {
+                isValid: false,
+                message: `Roll number must start with 'B2'. For example: B2402, B2513.`
+            };
+        }
+        
+        // Pattern: B2ABCD where A:4-5, B:0-4, C:0-9, D:0-9, excluding B2A000
+        const rollPattern = /^B2[45][0-4]\d{2}$/;
+        
+        if (rollPattern.test(trimmed)) {
+            // Check if it's not B2A000 pattern
+            const lastThreeDigits = trimmed.slice(-3);
+            if (lastThreeDigits !== '000') {
+                return {
+                    isValid: true,
+                    rollNumber: trimmed
+                };
+            }
+        }
+        
+        return {
+            isValid: false,
+            message: `Invalid roll number format. Please use the format B2ABCD where:
+- A must be 4 or 5
+- B must be 0-4
+- CD can be any digits except '000'
+For example: B2402, B2513.`
+        };
     }
 
     normalizeQuery(query) {
@@ -418,8 +454,12 @@ class CollegeAssistant {
     }
 
     isMessMenuQuery(query) {
-        return query.includes('lunch') || query.includes('dinner') || query.includes('breakfast') || 
-               query.includes('food') || query.includes('menu') || query.includes('meal') || query.includes('mess')|| query.includes('snacks')|| query.includes('snack');
+        const patterns = [
+            'lunch', 'dinner', 'breakfast', 'food', 'menu', 'meal', 'mess', 'snacks', 'snack',
+            'menu week', 'menu for the week', 'weekly menu', 'mess menu for week', 'week menu',
+            'mess this week', 'food this week', 'meals this week'
+        ];
+        return patterns.some(pattern => query.toLowerCase().includes(pattern));
     }
 
     isEventsQuery(query) {
@@ -434,7 +474,7 @@ class CollegeAssistant {
 
     async handleTimetableQuery(query) {
         if (!this.userRollNumber) {
-            return 'I need your roll number to show your timetable. Please tell me your roll number like "My roll number is B24035" or just type your roll number.';
+            return 'I need your roll number to show your timetable. Please tell me your roll number like "B24035" straight right in chat and I will remember it.';
         }
 
         try {
@@ -475,37 +515,48 @@ class CollegeAssistant {
 
     async handleMessMenuQuery(query) {
         try {
+            // Check if it's a weekly menu request
+            const isWeeklyRequest = query.toLowerCase().match(/\b(week|weekly)\b/);
             const timeInfo = this.parseTimeExpression(query);
             const mealTime = this.extractMealTime(query);
             
             let targetDate = this.currentDate;
-            let displayDate = 'today';
+            let displayDate = isWeeklyRequest ? 'this week' : 'today';
             
-            if (timeInfo && timeInfo.type === 'specific_date') {
+            if (timeInfo && timeInfo.type === 'specific_date' && !isWeeklyRequest) {
                 targetDate = timeInfo.date;
                 displayDate = this.formatDateForDisplay(targetDate);
             }
             
-            const dayName = this.getDayName(targetDate);
             const data = await this.fetchSheetData('messmenu');
             
             // Handle case where API might fail or return no data
             if (!data || data.length === 0) {
-                return this.getSampleMessMenuResponse(dayName, mealTime, displayDate);
+                if (isWeeklyRequest) {
+                    return this.formatWeeklyMessMenuResponse(this.getSampleWeeklyMenu());
+                }
+                return this.getSampleMessMenuResponse(this.getDayName(targetDate), mealTime, displayDate);
+            }
+            
+            if (isWeeklyRequest) {
+                return this.formatWeeklyMessMenuResponse(data);
             }
             
             // Find menu for the requested day
             const dayMenu = data.find(row => 
-                row && row[0] && row[0].toLowerCase() === dayName.toLowerCase()
+                row && row[0] && row[0].toLowerCase() === this.getDayName(targetDate).toLowerCase()
             );
             
             if (!dayMenu) {
-                return this.getSampleMessMenuResponse(dayName, mealTime, displayDate);
+                return this.getSampleMessMenuResponse(this.getDayName(targetDate), mealTime, displayDate);
             }
             
             return this.formatMessMenuResponse(dayMenu, displayDate, mealTime);
         } catch (error) {
             console.error('Error fetching mess menu:', error);
+            if (query.toLowerCase().match(/\b(week|weekly)\b/)) {
+                return this.formatWeeklyMessMenuResponse(this.getSampleWeeklyMenu());
+            }
             const timeInfo = this.parseTimeExpression(query);
             let targetDate = this.currentDate;
             if (timeInfo && timeInfo.type === 'specific_date') {
@@ -575,42 +626,107 @@ class CollegeAssistant {
 
     // Find specific individual contact
     findSpecificContact(query, contactsData) {
-        const searchTerms = {
-            'principal': ['principal', 'principal office', 'principal contact', 'principal number'],
-            'medical': ['medical', 'medical room', 'medical contact', 'doctor', 'medical number', 'health'],
-            'hostel': ['hostel', 'hostel warden', 'warden', 'hostel contact', 'hostel number', 'accommodation'],
-            'library': ['library', 'librarian', 'library contact', 'library number'],
-            'sports': ['sports', 'sports department', 'sports contact', 'sports number', 'gym'],
-            'it': ['it', 'it department', 'computer', 'tech', 'technical'],
-            'accounts': ['accounts', 'accounts office', 'finance', 'fees'],
-            'admission': ['admission', 'admission office', 'admissions', 'enrollment']
-        };
+        if (!contactsData || contactsData.length <= 1) return null;
         
         const queryLower = query.toLowerCase();
+        let departmentNames = new Set();
+        let departmentKeywords = new Map();
         
-        // Find matching department
-        for (const [dept, terms] of Object.entries(searchTerms)) {
-            if (terms.some(term => queryLower.includes(term))) {
-                // Find contact in data
+        // Extract department names and build keywords from the contacts data
+        contactsData.slice(1).forEach(row => {
+            if (row && row[0]) {
+                const dept = row[0].toLowerCase();
+                departmentNames.add(dept);
+                
+                // Generate keywords from department name
+                const keywords = [
+                    dept,
+                    `${dept} office`,
+                    `${dept} contact`,
+                    `${dept} number`,
+                    `${dept} department`
+                ];
+                
+                // Add common variations
+                if (dept.includes('department')) {
+                    keywords.push(dept.replace('department', '').trim());
+                }
+                
+                departmentKeywords.set(dept, keywords);
+            }
+        });
+        
+        // Search for matches
+        for (const [dept, keywords] of departmentKeywords) {
+            if (keywords.some(keyword => queryLower.includes(keyword))) {
                 const contact = contactsData.slice(1).find(row => 
-                    row && row[0] && row[0].toLowerCase().includes(dept)
+                    row && row[0] && row[0].toLowerCase() === dept
                 );
                 
                 if (contact) {
-                    return { department: contact[0], number: contact[1], searchTerm: dept };
+                    return { 
+                        department: contact[0], 
+                        number: contact[1], 
+                        searchTerm: dept,
+                        description: contact[2] || '' // Support for optional description field
+                    };
+                }
+            }
+        }
+        
+        // Fuzzy match if no exact match found
+        for (const dept of departmentNames) {
+            if (this.fuzzyMatch(queryLower, dept)) {
+                const contact = contactsData.slice(1).find(row => 
+                    row && row[0] && row[0].toLowerCase() === dept
+                );
+                
+                if (contact) {
+                    return { 
+                        department: contact[0], 
+                        number: contact[1], 
+                        searchTerm: dept,
+                        description: contact[2] || ''
+                    };
                 }
             }
         }
         
         return null;
     }
+    
+    fuzzyMatch(query, target) {
+        query = query.toLowerCase();
+        target = target.toLowerCase();
+        
+        // Simple fuzzy matching - checks if most characters appear in sequence
+        let queryIndex = 0;
+        let targetIndex = 0;
+        
+        while (queryIndex < query.length && targetIndex < target.length) {
+            if (query[queryIndex] === target[targetIndex]) {
+                queryIndex++;
+            }
+            targetIndex++;
+        }
+        
+        // Consider it a match if we found at least 70% of the characters
+        return queryIndex / query.length >= 0.7;
+    }
 
     formatSpecificContactResponse(contact, originalQuery) {
-        return `<div class="event-card">
+        let html = `<div class="event-card">
             <h4>📞 ${contact.department}</h4>
-            <p><strong>Contact Number:</strong> <a href="tel:${contact.number}" target="_blank">${contact.number}</a></p>
-            <p><em>You can call this number for any queries related to ${contact.department.toLowerCase()}.</em></p>
-        </div>`;
+            <p><strong>Contact Number:</strong> <a href="tel:${contact.number}" target="_blank">${contact.number}</a></p>`;
+            
+        if (contact.description) {
+            html += `<p><em>${contact.description}</em></p>`;
+        } else {
+            html += `<p><em>You can call this number for any queries related to ${contact.department.toLowerCase()}.</em></p>`;
+        }
+        
+        html += '</div>';
+        return html;
     }
 
     filterEventsByTimeInfo(events, timeInfo) {
@@ -698,6 +814,18 @@ class CollegeAssistant {
         if (query.includes('dinner') || query.includes('supper')) return 'dinner';
         if (query.includes('snack')) return 'snacks';
         return null;
+    }
+
+    getSampleWeeklyMenu() {
+        return [
+            ['Monday', 'Poha, Tea', 'Rice, Dal, Sabji', 'Samosa, Tea', 'Roti, Paneer'],
+            ['Tuesday', 'Upma, Coffee', 'Rice, Rajma', 'Pakora, Tea', 'Roti, Dal'],
+            ['Wednesday', 'Idli, Coffee', 'Rice, Chicken Curry', 'Bread Pakora, Tea', 'Roti, Aloo Sabji'],
+            ['Thursday', 'Paratha, Curd', 'Rice, Fish Curry', 'Samosa, Tea', 'Roti, Dal Fry'],
+            ['Friday', 'Dosa, Coffee', 'Biryani, Raita', 'Vada Pav, Tea', 'Roti, Paneer Masala'],
+            ['Saturday', 'Poha, Tea', 'Rice, Mutton Curry', 'Bhel Puri, Tea', 'Roti, Mixed Veg'],
+            ['Sunday', 'Chole Bhature', 'Special Thali', 'Pav Bhaji', 'Roti, Dal Makhani']
+        ];
     }
 
     getSampleMessMenuResponse(dayName, mealTime, displayDate) {
@@ -854,6 +982,28 @@ class CollegeAssistant {
         return html;
     }
 
+    formatWeeklyMessMenuResponse(weeklyMenu) {
+        let html = '<p><strong>🍽️ Mess menu for the week:</strong></p>';
+        html += '<div class="weekly-menu">';
+        
+        weeklyMenu.forEach(dayMenu => {
+            if (!dayMenu || !dayMenu[0]) return;
+            
+            html += `<div class="day-menu-card">
+                <h4>${dayMenu[0]}</h4>
+                <ul>
+                    <li><strong>Breakfast:</strong> ${dayMenu[1] || 'Not available'}</li>
+                    <li><strong>Lunch:</strong> ${dayMenu[2] || 'Not available'}</li>
+                    <li><strong>Snacks:</strong> ${dayMenu[3] || 'Not available'}</li>
+                    <li><strong>Dinner:</strong> ${dayMenu[4] || 'Not available'}</li>
+                </ul>
+            </div>`;
+        });
+        
+        html += '</div>';
+        return html;
+    }
+
     formatMessMenuResponse(menu, displayDate, mealTime) {
         let html = `<p><strong>🍽️ Mess menu for ${displayDate}:</strong></p>`;
         
@@ -928,27 +1078,57 @@ class CollegeAssistant {
     }
 
     getHelpResponse() {
-        return `<p><strong>Here's what I can help you with:</strong></p>
+        return `
+        <h3>🤖 College Assistant Help Guide</h3>
+        <p>I can help you with a variety of college-related queries. Here’s a detailed guide on what you can ask me:</p>
+        <hr>
+        <h4>📅 Timetables & Classes</h4>
         <ul>
-            <li><strong>📅 Timetables:</strong> "Show my timetable", "Classes tomorrow", "Classes day after tomorrow", "Next Monday classes"</li>
-            <li><strong>📊 Attendance:</strong> "My attendance", "Show my attendance summary"</li>
-            <li><strong>🍽️ Mess Menu:</strong> "What's for lunch today?", "Dinner day after tomorrow", "Menu next Monday"</li>
-            <li><strong>🎉 Events:</strong> "Events today", "Events next week", "Events in January"</li>
-            <li><strong>📞 Contacts:</strong> "Principal contact", "Medical contact", "Hostel warden number"</li>
+            <li>Show your full timetable: <code>show my timetable</code>, <code>my class schedule</code></li>
+            <li>Classes for a specific day: <code>classes tomorrow</code>, <code>classes on Friday</code>, <code>classes day after tomorrow</code></li>
+            <li>Classes for a week: <code>classes this week</code>, <code>next week classes</code></li>
         </ul>
-        <p><strong>Time expressions I understand:</strong></p>
+        <h4>📊 Attendance</h4>
         <ul>
-            <li>Today, tomorrow, day after tomorrow</li>
-            <li>Next Monday, this Friday, next week</li>
-            <li>On 25th next month, events in January</li>
-            <li>In 2 days, 2 days later</li>
+            <li>Overall attendance: <code>show my attendance</code>, <code>attendance summary</code></li>
+            <li>Attendance for a subject: <code>attendance for Mathematics</code>, <code>my Physics attendance</code></li>
+            <li>Check if you have enough attendance: <code>do I have enough attendance?</code></li>
         </ul>
-        <p><strong>Tips:</strong></p>
+        <h4>🍽️ Mess Menu</h4>
         <ul>
-            <li>Just type your roll number (e.g., "B24035") to save it</li>
-            <li>Use natural language: "What classes do I have day after tomorrow?"</li>
-            <li>Ask for specific contacts: "Principal contact", "Medical number"</li>
-        </ul>`;
+            <li>Today's meal: <code>what's for lunch today?</code>, <code>breakfast tomorrow</code></li>
+            <li>Meal for a specific day: <code>dinner on Sunday</code>, <code>lunch next Monday</code></li>
+            <li>Weekly menu: <code>menu for the week</code>, <code>weekly mess menu</code></li>
+        </ul>
+        <h4>🎉 Events & Activities</h4>
+        <ul>
+            <li>Today's events: <code>events today</code>, <code>what's happening on campus?</code></li>
+            <li>Upcoming events: <code>events next week</code>, <code>events in January</code></li>
+        </ul>
+        <h4>📞 Department & Staff Contacts</h4>
+        <ul>
+            <li>Find a department: <code>principal contact</code>, <code>medical room number</code>, <code>hostel warden contact</code></li>
+            <li>Any department or staff listed in the contacts sheet can be found by name or role.</li>
+        </ul>
+        <hr>
+        <h4>🕒 Time Expressions I Understand</h4>
+        <ul>
+            <li><b>Days:</b> today, tomorrow, day after tomorrow, yesterday</li>
+            <li><b>Weekdays:</b> next Monday, this Friday, on Sunday, etc.</li>
+            <li><b>Weeks/Months:</b> this week, next week, this month, next month, events in January</li>
+            <li><b>Relative:</b> in 2 days, 3 days ago, in 2 months</li>
+        </ul>
+        <h4>💡 Tips & Best Practices</h4>
+        <ul>
+            <li>Just type your roll number (e.g., <code>B24035</code>) to save it for personalized queries.</li>
+            <li>Use natural language: <code>What classes do I have day after tomorrow?</code></li>
+            <li>Ask for specific contacts: <code>Principal contact</code>, <code>Medical number</code></li>
+            <li>Click on quick action buttons for instant answers to common queries.</li>
+            <li>If you add a new contact in the Google Sheet, you can search for it immediately.</li>
+        </ul>
+        <hr>
+        <p>If you need more help, just type <b>help</b> or describe what you want to know!</p>
+        `;
     }
 
     getDefaultResponse(query) {
