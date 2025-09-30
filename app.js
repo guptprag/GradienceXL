@@ -1,1212 +1,1002 @@
-// ============= CONFIGURATION =============
-// 🚨 SECURITY WARNING: Never expose API keys in client-side code in production!
-// For production use, implement a backend proxy or use environment variables
-const CONFIG = {
-    apiKey: 'AIzaSyDR-Bk7iVfJK9jA7HBnu4AyBVKReTiQsEc', // Replace with your Google Sheets API key
-    spreadsheetId: '1oAdQ-H2sOcQFzwMfX9LKMhoghUyhrXBPPd8gMLj7TQA', // Replace with your Google Sheets ID
-    sheetNames: {
-        timetable: 'timetable',
-        attendance: 'attendance',
-        mess_menu: 'mess_menu',
-        events: 'events',
-        contacts: 'contacts',
-        subjects: 'subjects'
-    },
-    cache: {
-        duration: 300000, // 5 minutes in milliseconds
-        maxEntries: 10
-    },
-    retryAttempts: 3,
-    retryDelay: 1000 // milliseconds
-};
-
-// Google Sheets API Configuration
-const SHEETS_API = {
-    baseUrl: 'https://sheets.googleapis.com/v4/spreadsheets',
-    getUrl: (sheetName) => 
-        `${SHEETS_API.baseUrl}/${CONFIG.spreadsheetId}/values/${sheetName}?key=${CONFIG.apiKey}&majorDimension=ROWS`
-};
-
-// Conversation State Management
-let conversationState = {
-    waitingFor: null, // 'roll_number' when waiting for input
-    pendingAction: null, // 'timetable' or 'attendance'
-    lastRollNumber: null // remember last used roll number
-};
-// ========================================
-
-// Cache Management System
-class DataCache {
+// College Assistant Chatbot Application
+class CollegeAssistant {
     constructor() {
-        console.log('[DataCache] constructor');
-        this.cache = new Map();
-        this.timestamps = new Map();
+        this.apiKey = 'AIzaSyDR-Bk7iVfJK9jA7HBnu4AyBVKReTiQsEc';
+        this.sheetId = '1oAdQ-H2sOcQFzwMfX9LKMhoghUyhrXBPPd8gMLj7TQA';
+        this.sheets = {
+            timetable: 'timetable',
+            attendance: 'attendance',
+            messmenu: 'messmenu',
+            events: 'events',
+            contacts: 'contacts',
+            subjects: 'subjects'
+        };
+        
+        this.userRollNumber = null;
+        this.conversationContext = [];
+        this.isTyping = false;
+        
+        // Current date context: Tuesday, September 30, 2025, 1:40 PM IST
+        this.currentDate = new Date('2025-09-30T13:40:00+05:30');
+        
+        this.init();
     }
 
-    set(key, data) {
-        console.log('[DataCache] set', { key, hasData: !!data, dataType: typeof data });
-        this.cache.set(key, data);
-        this.timestamps.set(key, Date.now());
-        this.cleanupOldEntries();
+    init() {
+        this.bindEvents();
+        this.setupQuickActions();
     }
 
-    get(key) {
-        console.log('[DataCache] get', { key });
-        const timestamp = this.timestamps.get(key);
-        if (!timestamp || Date.now() - timestamp > CONFIG.cache.duration) {
-            console.log('[DataCache] get -> expired or missing', { key, timestamp });
-            this.cache.delete(key);
-            this.timestamps.delete(key);
-            return null;
-        }
-        console.log('[DataCache] get -> hit', { key, ageMs: Date.now() - timestamp });
-        return this.cache.get(key);
+    bindEvents() {
+        const chatInput = document.getElementById('chatInput');
+        const sendButton = document.getElementById('sendButton');
+        
+        chatInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                this.handleUserInput();
+            }
+        });
+        
+        sendButton.addEventListener('click', () => {
+            this.handleUserInput();
+        });
+
+        // Handle suggestion chips
+        document.addEventListener('click', (e) => {
+            if (e.target.classList.contains('chip')) {
+                chatInput.value = e.target.textContent.replace(/[""]/g, '');
+                this.handleUserInput();
+            }
+        });
     }
 
-    clear() {
-        console.log('[DataCache] clear');
-        this.cache.clear();
-        this.timestamps.clear();
+    setupQuickActions() {
+        const quickButtons = document.querySelectorAll('.quick-btn');
+        quickButtons.forEach(btn => {
+            btn.addEventListener('click', () => {
+                const action = btn.getAttribute('data-action');
+                this.handleQuickAction(action);
+            });
+        });
     }
 
-    cleanupOldEntries() {
-        console.log('[DataCache] cleanupOldEntries', { size: this.cache.size, max: CONFIG.cache.maxEntries });
-        if (this.cache.size > CONFIG.cache.maxEntries) {
-            const oldestKey = this.timestamps.keys().next().value;
-            console.log('[DataCache] evicting oldest', { oldestKey });
-            this.cache.delete(oldestKey);
-            this.timestamps.delete(oldestKey);
-        }
-    }
-
-    getLastUpdated(key) {
-        const ts = this.timestamps.get(key);
-        console.log('[DataCache] getLastUpdated', { key, ts });
-        return ts;
-    }
-}
-
-// College Chatbot Application
-class CollegeChatbot {
-    constructor() {
-        console.log('[Chatbot] constructor start');
-        this.cache = new DataCache();
-        this.isOnline = navigator.onLine;
-        this.apiConnected = false;
-        this.initializeElements();
-        this.setupEventListeners();
-        this.checkConfiguration();
-        this.initializeAPI();
-        console.log('[Chatbot] constructor end');
-    }
-
-    initializeElements() {
-        console.log('[Chatbot] initializeElements');
-        this.elements = {
-            chatMessages: document.getElementById('chatMessages'),
-            messageInput: document.getElementById('messageInput'),
-            sendButton: document.getElementById('sendButton'),
-            typingIndicator: document.getElementById('typingIndicator'),
-            apiStatus: document.getElementById('apiStatus'),
-            statusText: document.getElementById('statusText'),
-            refreshBtn: document.getElementById('refreshBtn'),
-            loadingOverlay: document.getElementById('loadingOverlay'),
-            lastUpdated: document.getElementById('lastUpdated'),
-            cacheInfo: document.getElementById('cacheInfo')
+    handleQuickAction(action) {
+        const actionQueries = {
+            'timetable': 'show my timetable',
+            'classes-tomorrow': 'what classes do I have tomorrow',
+            'attendance': 'show my attendance',
+            'lunch-today': 'what is for lunch today',
+            'events-today': 'what events are happening today',
+            'contacts': 'show me department contacts',
+            'help': 'help'
         };
 
-        // Verify all elements exist
-        const missingElements = Object.entries(this.elements)
-            .filter(([key, element]) => !element)
-            .map(([key]) => key);
-
-        if (missingElements.length > 0) {
-            console.error('Missing DOM elements:', missingElements);
-        } else {
-            console.log('[Chatbot] All DOM elements present');
+        const query = actionQueries[action];
+        if (query) {
+            document.getElementById('chatInput').value = query;
+            this.handleUserInput();
         }
     }
 
-    setupEventListeners() {
-        console.log('[Chatbot] setupEventListeners');
-        // Send message on Enter key
-        this.elements.messageInput?.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') {
-                console.log('[UI] Enter pressed in messageInput');
-                e.preventDefault();
-                this.sendMessage();
-            }
-        });
-
-        // Send button click
-        this.elements.sendButton?.addEventListener('click', (e) => {
-            console.log('[UI] sendButton clicked');
-            e.preventDefault();
-            this.sendMessage();
-        });
-
-        // Refresh button click
-        this.elements.refreshBtn?.addEventListener('click', () => {
-            console.log('[UI] refreshBtn clicked');
-            this.refreshData();
-        });
-
-        // Quick action buttons (legacy)
-        document.addEventListener('click', (e) => {
-            if (e.target.classList.contains('quick-btn')) {
-                console.log('[UI] quick-btn clicked', { query: e.target.getAttribute('data-query') });
-                e.preventDefault();
-                const query = e.target.getAttribute('data-query');
-                if (query) {
-                    this.elements.messageInput.value = query;
-                    this.sendMessage();
-                }
-            }
-        });
-
-        // New shortcut buttons
-        document.addEventListener('click', (e) => {
-            const shortcutBtn = e.target.closest('.shortcut-btn');
-            if (shortcutBtn) {
-                const action = shortcutBtn.getAttribute('data-action');
-                const needsRoll = shortcutBtn.getAttribute('data-needs-roll') === 'true';
-                console.log('[UI] shortcut-btn clicked', { action, needsRoll });
-                e.preventDefault();
-                this.handleShortcutClick(action, needsRoll);
-            }
-        });
-
-        // Online/offline detection
-        window.addEventListener('online', () => {
-            console.log('[Net] online event');
-            this.isOnline = true;
-            this.updateConnectionStatus();
-        });
-
-        window.addEventListener('offline', () => {
-            console.log('[Net] offline event');
-            this.isOnline = false;
-            this.updateConnectionStatus();
-        });
-    }
-
-    handleShortcutClick(action, needsRoll) {
-        console.log('[Chatbot] handleShortcutClick', { action, needsRoll });
-        if (needsRoll) {
-            // Actions that need roll number (timetable, attendance)
-            this.promptForRollNumber(action);
-        } else {
-            // Actions that don't need roll number (mess_menu, events, contacts, subjects)
-            this.executeAction(action);
-        }
-    }
-
-    promptForRollNumber(action) {
-        console.log('[Chatbot] promptForRollNumber', { action });
-        conversationState.waitingFor = 'roll_number';
-        conversationState.pendingAction = action;
-
-        const rollPrompt = this.createRollNumberPrompt(action);
-        this.addMessage(rollPrompt, 'bot');
+    async handleUserInput() {
+        const input = document.getElementById('chatInput');
+        const message = input.value.trim();
         
-        // Focus on input for user convenience
-        this.elements.messageInput.focus();
-        const example = this.getRandomRollExample();
-        console.log('[Chatbot] prompt placeholder example', { example });
-        this.elements.messageInput.placeholder = `Enter your roll number (e.g., ${example})`;
-    }
-
-    createRollNumberPrompt(action) {
-        console.log('[Chatbot] createRollNumberPrompt', { action });
-        const actionName = action === 'timetable' ? 'Timetable' : 'Attendance';
-        const lastUsed = conversationState.lastRollNumber ? 
-            `<p>💡 <em>Last used: ${conversationState.lastRollNumber}</em></p>` : '';
-
-        const html = `
-            <div class="roll-prompt">
-                <h4>🔑 ${actionName} Request</h4>
-                <p>Please enter your roll number to view your personalized ${actionName.toLowerCase()}:</p>
-                <p><strong>Format examples:</strong> 21CS001, 22ME005, 20EC003</p>
-                ${lastUsed}
-            </div>
-        `;
-        console.log('[Chatbot] createRollNumberPrompt -> html length', html.length);
-        return html;
-    }
-
-    getRandomRollExample() {
-        console.log('[Chatbot] getRandomRollExample');
-        const examples = ['21CS001', '21ME001', '21EC001', '22CS001', '20CS001'];
-        const pick = examples[Math.floor(Math.random() * examples.length)];
-        console.log('[Chatbot] getRandomRollExample ->', pick);
-        return pick;
-    }
-
-    async executeAction(action, rollNumber = null) {
-        console.log('[Chatbot] executeAction start', { action, rollNumber });
+        if (!message) return;
+        
+        input.value = '';
+        this.addMessage(message, 'user');
+        this.showTypingIndicator();
+        
         try {
-            let response;
-            switch (action) {
-                case 'timetable':
-                    console.log('[Chatbot] executeAction -> timetable');
-                    response = await this.handleTimetableQuery(rollNumber ? `show timetable for ${rollNumber}` : 'show timetable');
-                    break;
-                case 'attendance':
-                    console.log('[Chatbot] executeAction -> attendance');
-                    response = await this.handleAttendanceQuery(rollNumber ? `show attendance for ${rollNumber}` : 'show attendance');
-                    break;
-                case 'mess_menu':
-                    console.log('[Chatbot] executeAction -> mess_menu');
-                    response = await this.handleMessMenuQuery('show today\'s menu');
-                    break;
-                case 'events':
-                    console.log('[Chatbot] executeAction -> events');
-                    response = await this.handleEventsQuery('show events');
-                    break;
-                case 'contacts':
-                    console.log('[Chatbot] executeAction -> contacts');
-                    response = await this.handleContactsQuery('show contacts');
-                    break;
-                case 'subjects':
-                    console.log('[Chatbot] executeAction -> subjects');
-                    response = await this.handleSubjectsQuery(rollNumber ? `show subjects for ${rollNumber}` : 'show subjects');
-                    break;
-                case 'restart':
-                    console.log('[Chatbot] executeAction -> restart');
-                    response = this.restartChatbot();
-                    break;
-                default:
-                    console.log('[Chatbot] executeAction -> unknown action');
-                    response = 'Unknown action. Please try again.';
-            }
-
-            // Add slight delay for better UX
-            this.showTypingIndicator();
-            await this.delay(800);
+            const response = await this.processQuery(message);
             this.hideTypingIndicator();
-            
             this.addMessage(response, 'bot');
         } catch (error) {
             this.hideTypingIndicator();
-            console.error('Error executing action:', error);
-            this.addMessage(this.getErrorMessage(error), 'bot');
-        } finally {
-            console.log('[Chatbot] executeAction end', { action });
+            this.addMessage('Sorry, I encountered an error. Please try again.', 'bot');
+            console.error('Error processing query:', error);
         }
     }
 
-    validateRollNumber(rollNumber) {
-        console.log('[Chatbot] validateRollNumber', { rollNumber });
-        // Pattern: 2-3 digits + 2-3 letters + 2-3 digits (flexible for different colleges)
-        const pattern = /^B2\d{4}$/i;
-        const valid = pattern.test(rollNumber.trim());
-        console.log('[Chatbot] validateRollNumber ->', valid);
-        return valid;
-    }
-
-    checkConfiguration() {
-        console.log('[Chatbot] checkConfiguration');
-        if (CONFIG.apiKey === 'YOUR_GOOGLE_API_KEY_HERE' || 
-            CONFIG.spreadsheetId === 'YOUR_SPREADSHEET_ID_HERE') {
-            this.showConfigurationWarning();
-            return false;
-        }
-        return true;
-    }
-
-    showConfigurationWarning() {
-        console.log('[Chatbot] showConfigurationWarning');
-        const warningHTML = `
-            <div class="message bot-message">
-                <div class="message-avatar">⚠️</div>
-                <div class="message-content">
-                    <div class="message-bubble">
-                        <div class="config-warning">
-                            <strong>Configuration Required</strong>
-                            <p>Please configure your Google Sheets API credentials in the app.js file:</p>
-                            <p>1. Replace <code>YOUR_GOOGLE_API_KEY_HERE</code> with your Google Sheets API key</p>
-                            <p>2. Replace <code>YOUR_SPREADSHEET_ID_HERE</code> with your Google Sheets ID</p>
-                            <p>3. Ensure your Google Sheets has the required sheet tabs: ${Object.values(CONFIG.sheetNames).join(', ')}</p>
-                        </div>
-                    </div>
-                    <div class="message-time">${this.getCurrentTime()}</div>
-                </div>
-            </div>
-        `;
-        this.elements.chatMessages.insertAdjacentHTML('beforeend', warningHTML);
-        this.scrollToBottom();
-    }
-
-    async initializeAPI() {
-        console.log('[Chatbot] initializeAPI start');
-        if (!this.checkConfiguration()) {
-            console.log('[Chatbot] initializeAPI aborted due to bad config');
-            return;
-        }
-
-        this.updateStatus('connecting', 'Connecting to API...');
+    async processQuery(query) {
+        // Store conversation context
+        this.conversationContext.push(query);
         
-        try {
-            // Test API connection with a simple request
-            await this.fetchSheetData('timetable');
-            this.apiConnected = true;
-            this.updateStatus('connected', 'Connected to Google Sheets');
-            this.updateCacheInfo();
-            console.log('[Chatbot] initializeAPI success');
-        } catch (error) {
-            this.apiConnected = false;
-            this.updateStatus('error', 'API Connection Failed');
-            console.error('API initialization failed:', error);
-            this.addMessage(this.getErrorMessage(error), 'bot');
-        } finally {
-            console.log('[Chatbot] initializeAPI end');
-        }
-    }
-
-    async fetchSheetData(sheetName, useCache = true) {
-        console.log('[API] fetchSheetData start', { sheetName, useCache });
-        // Check cache first if enabled
-        if (useCache) {
-            const cachedData = this.cache.get(sheetName);
-            if (cachedData) {
-                console.log(`[API] Using cached data for ${sheetName}`);
-                return cachedData;
-            }
-        }
-
-        // Check online status
-        if (!this.isOnline) {
-            console.log('[API] fetchSheetData -> offline');
-            throw new Error('No internet connection. Please check your network and try again.');
-        }
-
-        const url = SHEETS_API.getUrl(sheetName);
-        console.log('[API] fetchSheetData url', url);
-        let lastError;
-
-        // Retry mechanism
-        for (let attempt = 1; attempt <= CONFIG.retryAttempts; attempt++) {
-            try {
-                console.log(`Fetching ${sheetName} (attempt ${attempt}/${CONFIG.retryAttempts})`);
-                
-                const response = await fetch(url, {
-                    method: 'GET',
-                    headers: {
-                        'Accept': 'application/json'
-                    }
-                });
-
-                console.log('[API] fetch response', { ok: response.ok, status: response.status });
-
-                if (!response.ok) {
-                    const errorText = await response.text();
-                    console.log('[API] fetch non-ok body', errorText);
-                    throw new Error(`HTTP ${response.status}: ${this.getHttpErrorMessage(response.status, errorText)}`);
-                }
-
-                const result = await response.json();
-                console.log('[API] fetch json parsed', { hasValues: !!result.values, rows: result.values?.length });
-
-                if (!result.values || !Array.isArray(result.values)) {
-                    throw new Error(`No data found in sheet "${sheetName}". Please check if the sheet exists and has data.`);
-                }
-
-                // Cache the successful result
-                this.cache.set(sheetName, result.values);
-                this.updateCacheInfo();
-                
-                console.log('[API] fetchSheetData success', { sheetName, rows: result.values.length });
-                return result.values;
-
-            } catch (error) {
-                lastError = error;
-                console.error(`Attempt ${attempt} failed for ${sheetName}:`, error);
-                
-                // Don't retry on certain errors
-                if (error.message.includes('404') || error.message.includes('403')) {
-                    console.log('[API] fetchSheetData no-retry error', { sheetName });
-                    throw error;
-                }
-                
-                // Wait before retrying (except on last attempt)
-                if (attempt < CONFIG.retryAttempts) {
-                    const delayMs = CONFIG.retryDelay * attempt;
-                    console.log('[API] retrying after delay', { delayMs });
-                    await this.delay(delayMs);
-                }
-            }
-        }
-
-        console.log('[API] fetchSheetData throwing lastError');
-        throw lastError;
-    }
-
-    getHttpErrorMessage(status, errorText) {
-        console.log('[API] getHttpErrorMessage', { status });
-        switch (status) {
-            case 400:
-                return 'Bad request. Please check your API key and spreadsheet ID.';
-            case 403:
-                return 'Access forbidden. Please check your API key permissions and spreadsheet sharing settings.';
-            case 404:
-                return 'Spreadsheet or sheet not found. Please verify your spreadsheet ID and sheet names.';
-            case 429:
-                return 'API rate limit exceeded. Please try again in a few minutes.';
-            case 500:
-                return 'Google Sheets API server error. Please try again later.';
-            default:
-                return errorText || 'Unknown error occurred';
-        }
-    }
-
-    delay(ms) {
-        console.log('[Util] delay', { ms });
-        return new Promise(resolve => setTimeout(resolve, ms));
-    }
-
-    async sendMessage() {
-        console.log('[Chatbot] sendMessage start');
-        const message = this.elements.messageInput.value.trim();
-        if (!message) {
-            console.log('[Chatbot] sendMessage aborted: empty message');
-            return;
-        }
-
-        // Disable send button and input during processing
-        this.elements.sendButton.disabled = true;
-        this.elements.messageInput.disabled = true;
-
-        // Add user message
-        this.addMessage(message, 'user');
-        this.elements.messageInput.value = '';
-        this.elements.messageInput.placeholder = 'Type your message here...';
-
-        // Check if we're waiting for roll number input
-        if (conversationState.waitingFor === 'roll_number') {
-            console.log('[Chatbot] expecting roll_number, delegating to handleRollNumberInput');
-            await this.handleRollNumberInput(message);
-        } else {
-            // Show typing indicator with a slight delay for better UX
-            setTimeout(() => {
-                console.log('[UI] showTypingIndicator (delayed)');
-                this.showTypingIndicator();
-            }, 300);
-
-            try {
-                // Add minimum delay to show typing indicator
-                const [response] = await Promise.all([
-                    this.processMessage(message),
-                    this.delay(1200) // Minimum 1.2 seconds to show typing indicator
-                ]);
-                
-                this.hideTypingIndicator();
-                this.addMessage(response, 'bot');
-            } catch (error) {
-                this.hideTypingIndicator();
-                console.error('Error processing message:', error);
-                this.addMessage(this.getErrorMessage(error), 'bot');
-            }
-        }
-
-        // Re-enable send button and input
-        this.elements.sendButton.disabled = false;
-        this.elements.messageInput.disabled = false;
-        this.elements.messageInput.focus();
-        console.log('[Chatbot] sendMessage end');
-    }
-
-    async handleRollNumberInput(rollNumber) {
-        console.log('[Chatbot] handleRollNumberInput', { rollNumber });
-        const cleanRollNumber = rollNumber.trim().toUpperCase();
-
-        if (!this.validateRollNumber(cleanRollNumber)) {
-            console.log('[Chatbot] invalid roll number provided');
-            this.addMessage(`❌ Invalid roll number format. Please use format like: ${this.getRandomRollExample()}`, 'bot');
-            return;
-        }
-
-        // Store roll number and clear waiting state
-        conversationState.lastRollNumber = cleanRollNumber;
-        const pendingAction = conversationState.pendingAction;
-        console.log('[Chatbot] roll number valid', { cleanRollNumber, pendingAction });
+        // Normalize query for processing
+        const normalizedQuery = this.normalizeQuery(query);
         
-        // Clear conversation state
-        conversationState.waitingFor = null;
-        conversationState.pendingAction = null;
-
-        // Execute the pending action
-        this.addMessage(`✅ Roll number received: ${cleanRollNumber}`, 'bot');
-        await this.executeAction(pendingAction, cleanRollNumber);
+        // Check if user is providing just a roll number (automatic detection)
+        const rollNumberOnly = this.detectRollNumber(query.trim());
+        if (rollNumberOnly) {
+            this.userRollNumber = rollNumberOnly;
+            return `Got it! I've saved your roll number as ${this.userRollNumber}. Now I can help with your personal queries like timetable, attendance, and more!`;
+        }
+        
+        // Check if user is providing roll number with text
+        const rollNumberMatch = query.match(/(?:my roll number is|roll number|roll no\.?)\s*([A-Z]+\d+)/i);
+        if (rollNumberMatch) {
+            this.userRollNumber = rollNumberMatch[1].toUpperCase();
+            return `Great! I've saved your roll number as ${this.userRollNumber}. Now I can help you with personalized information like your timetable and attendance.`;
+        }
+        
+        // Handle greetings
+        if (this.isGreeting(normalizedQuery)) {
+            return this.getGreetingResponse();
+        }
+        
+        // Handle help requests
+        if (this.isHelpRequest(normalizedQuery)) {
+            return this.getHelpResponse();
+        }
+        
+        // Handle various query types
+        if (this.isTimetableQuery(normalizedQuery)) {
+            return await this.handleTimetableQuery(normalizedQuery);
+        }
+        
+        if (this.isAttendanceQuery(normalizedQuery)) {
+            return await this.handleAttendanceQuery(normalizedQuery);
+        }
+        
+        if (this.isMessMenuQuery(normalizedQuery)) {
+            return await this.handleMessMenuQuery(normalizedQuery);
+        }
+        
+        if (this.isEventsQuery(normalizedQuery)) {
+            return await this.handleEventsQuery(normalizedQuery);
+        }
+        
+        if (this.isContactsQuery(normalizedQuery)) {
+            return await this.handleContactsQuery(normalizedQuery);
+        }
+        
+        // Default response for unrecognized queries
+        return this.getDefaultResponse(query);
     }
 
-    async processMessage(message) {
-        console.log('[Chatbot] processMessage', { message });
-        const lowerMessage = message.toLowerCase().trim();
+    // Enhanced roll number detection for standalone input
+    detectRollNumber(text) {
+        const rollPattern = /^[A-Z]+\d+$/i;
+        const trimmed = text.trim();
+        return rollPattern.test(trimmed) ? trimmed.toUpperCase() : null;
+    }
 
-        // Help queries
-        if (lowerMessage.includes('help') || lowerMessage === '?') {
-            console.log('[NLP] matched help');
-            return this.getHelpMessage();
+    normalizeQuery(query) {
+        return query.toLowerCase()
+            .replace(/tommorrow|tommorow/, 'tomorrow')
+            .replace(/attendence/, 'attendance')
+            .replace(/timetabel|time table/, 'timetable')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    parseTimeExpression(query) {
+        const today = new Date(this.currentDate); // Use a copy to avoid modifying the original
+
+        // Yesterday
+        if (/\byesterday\b/.test(query)) {
+            const targetDate = new Date(today);
+            targetDate.setDate(today.getDate() - 1);
+            return { date: targetDate, type: 'specific_date' };
         }
 
-        // Greetings
-        if (lowerMessage.match(/^(hi|hello|hey|good morning|good afternoon|good evening)/)) {
-            console.log('[NLP] matched greeting');
-            return "Hello! 👋 I'm your college chatbot with live Google Sheets integration. I can help you with timetables, attendance, mess menu, events, contacts, and subjects. Use the quick shortcuts above or ask me naturally! All data is fetched in real-time! What would you like to know?";
+        // Today
+        if (/\btoday\b/.test(query)) {
+            return { date: today, type: 'specific_date' };
         }
 
-        // Timetable queries
-        if (lowerMessage.includes('timetable') || lowerMessage.includes('schedule')) {
-            console.log('[NLP] matched timetable');
-            return await this.handleTimetableQuery(lowerMessage);
+        // Day after tomorrow
+        if (/\bday after tomorrow\b/.test(query)) {
+            const targetDate = new Date(today);
+            targetDate.setDate(today.getDate() + 2);
+            return { date: targetDate, type: 'specific_date' };
         }
 
-        // Attendance queries
-        if (lowerMessage.includes('attendance')) {
-            console.log('[NLP] matched attendance');
-            return await this.handleAttendanceQuery(lowerMessage);
+        // Tomorrow
+        if (/\btomorrow\b/.test(query)) {
+            const targetDate = new Date(today);
+            targetDate.setDate(today.getDate() + 1);
+            return { date: targetDate, type: 'specific_date' };
         }
 
-        // Mess menu queries
-        if (lowerMessage.includes('menu') || lowerMessage.includes('mess') || lowerMessage.includes('food') || 
-            lowerMessage.includes('breakfast') || lowerMessage.includes('lunch') || 
-            lowerMessage.includes('dinner') || lowerMessage.includes('snacks') || lowerMessage.includes('today')) {
-            console.log('[NLP] matched mess menu');
-            return await this.handleMessMenuQuery(lowerMessage);
+        // In X days
+        const inDaysMatch = query.match(/in (\d+) days?/);
+        if (inDaysMatch) {
+            const days = parseInt(inDaysMatch[1]);
+            const targetDate = new Date(today);
+            targetDate.setDate(today.getDate() + days);
+            return { date: targetDate, type: 'specific_date' };
         }
 
-        // Events queries
-        if (lowerMessage.includes('event') || lowerMessage.includes('fest') || lowerMessage.includes('celebration') ||
-            lowerMessage.includes('upcoming')) {
-            console.log('[NLP] matched events');
-            return await this.handleEventsQuery(lowerMessage);
+        // X days ago
+        const daysAgoMatch = query.match(/(\d+) days? ago/);
+        if (daysAgoMatch) {
+            const days = parseInt(daysAgoMatch[1]);
+            const targetDate = new Date(today);
+            targetDate.setDate(today.getDate() - days);
+            return { date: targetDate, type: 'specific_date' };
         }
 
-        // Contacts queries
-        if (lowerMessage.includes('contact') || lowerMessage.includes('number') || lowerMessage.includes('phone')) {
-            console.log('[NLP] matched contacts');
-            return await this.handleContactsQuery(lowerMessage);
+        // Weekdays (last, this, next, on)
+        const weekdayMatch = query.match(/(last|this|next|on)?\s*(monday|tuesday|wednesday|thursday|friday|saturday|sunday)/);
+        if (weekdayMatch) {
+            const modifier = weekdayMatch[1];
+            const weekday = weekdayMatch[2];
+            let targetDate;
+
+            if (modifier === 'last') {
+                targetDate = this.getPreviousWeekday(today, weekday);
+            } else if (modifier === 'next') {
+                targetDate = this.getNextWeekday(today, weekday);
+            } else { // 'this' or 'on' or no modifier
+                targetDate = this.getCurrentOrNextWeekday(today, weekday);
+            }
+            return { date: targetDate, type: 'specific_date', weekday };
         }
 
-        // Subjects queries
-        if (lowerMessage.includes('subject')) {
-            console.log('[NLP] matched subjects');
-            return await this.handleSubjectsQuery(lowerMessage);
+        // Month-related queries (next jan, in january, etc.)
+        const monthMatch = query.match(/(next|last|this)?\s*(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/);
+        if (monthMatch) {
+            const modifier = monthMatch[1];
+            const monthName = monthMatch[2];
+            const monthIndex = this.getMonthIndex(monthName);
+            let year = today.getFullYear();
+
+            if (modifier === 'next' || (!modifier && monthIndex < today.getMonth())) {
+                year++;
+            } else if (modifier === 'last') {
+                year--;
+            }
+
+            const targetMonth = new Date(year, monthIndex, 1);
+            return { date: targetMonth, type: 'month', month: monthIndex, year };
         }
 
-        console.log('[NLP] no intent matched, returning default response');
-        return this.getDefaultResponse();
+        // In X months
+        const inMonthsMatch = query.match(/in (\d+) months?/);
+        if (inMonthsMatch) {
+            const months = parseInt(inMonthsMatch[1]);
+            const targetDate = new Date(today);
+            targetDate.setMonth(today.getMonth() + months);
+            return { date: targetDate, type: 'month', month: targetDate.getMonth(), year: targetDate.getFullYear() };
+        }
+
+        // Next month
+        if (/\bnext month\b/.test(query)) {
+            const startDate = new Date(today.getFullYear(), today.getMonth() + 1, 1);
+            const endDate = new Date(today.getFullYear(), today.getMonth() + 2, 0);
+            return { startDate, endDate, type: 'date_range', period: 'next month' };
+        }
+
+        // This month
+        if (/\bthis month\b/.test(query)) {
+            const startDate = new Date(today.getFullYear(), today.getMonth(), 1);
+            const endDate = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+            return { startDate, endDate, type: 'date_range', period: 'this month' };
+        }
+
+        // Last month
+        if (/\blast month\b/.test(query)) {
+            const startDate = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+            const endDate = new Date(today.getFullYear(), today.getMonth(), 0);
+            return { startDate, endDate, type: 'date_range', period: 'last month' };
+        }
+
+        // Next week
+        if (/\bnext week\b/.test(query)) {
+            const startDate = new Date(today);
+            startDate.setDate(today.getDate() + (7 - today.getDay()) + 1); // Next Monday
+            const endDate = new Date(startDate);
+            endDate.setDate(startDate.getDate() + 6); // Following Sunday
+            return { startDate, endDate, type: 'date_range', period: 'next week' };
+        }
+
+        // This week
+        if (/\bthis week\b/.test(query)) {
+            const startDate = new Date(today);
+            startDate.setDate(today.getDate() - today.getDay() + 1); // This Monday
+            const endDate = new Date(startDate);
+            endDate.setDate(startDate.getDate() + 6); // This Sunday
+            return { startDate, endDate, type: 'date_range', period: 'this week' };
+        }
+
+        // Last week
+        if (/\blast week\b/.test(query)) {
+            const startDate = new Date(today);
+            startDate.setDate(today.getDate() - today.getDay() - 6); // Last Monday
+            const endDate = new Date(startDate);
+            endDate.setDate(startDate.getDate() + 6); // Last Sunday
+            return { startDate, endDate, type: 'date_range', period: 'last week' };
+        }
+
+        return null; // No date expression found
+    }
+
+    getPreviousWeekday(currentDate, weekdayName) {
+        const weekdays = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+        const targetWeekday = weekdays.indexOf(weekdayName.toLowerCase());
+        const currentWeekday = currentDate.getDay();
+
+        let daysToSubtract = currentWeekday - targetWeekday;
+        if (daysToSubtract <= 0) {
+            daysToSubtract += 7;
+        }
+
+        const targetDate = new Date(currentDate);
+        targetDate.setDate(currentDate.getDate() - daysToSubtract);
+        return targetDate;
+    }
+    
+    getCurrentOrNextWeekday(currentDate, weekdayName) {
+        const weekdays = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+        const targetWeekday = weekdays.indexOf(weekdayName.toLowerCase());
+        const currentWeekday = currentDate.getDay();
+
+        let daysToAdd = targetWeekday - currentWeekday;
+        if (daysToAdd < 0) { // If the day has already passed this week, get next week's
+            daysToAdd += 7;
+        }
+
+        const targetDate = new Date(currentDate);
+        targetDate.setDate(currentDate.getDate() + daysToAdd);
+        return targetDate;
+    }
+
+    getNextWeekday(currentDate, weekdayName) {
+        const weekdays = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+        const targetWeekday = weekdays.indexOf(weekdayName.toLowerCase());
+        const currentWeekday = currentDate.getDay();
+        
+        let daysToAdd = targetWeekday - currentWeekday;
+        if (daysToAdd <= 0) {
+            daysToAdd += 7; // Move to next week
+        }
+        
+        const targetDate = new Date(currentDate);
+        targetDate.setDate(currentDate.getDate() + daysToAdd);
+        return targetDate;
+    }
+
+    getCurrentWeekday(currentDate, weekdayName) {
+        const weekdays = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+        const targetWeekday = weekdays.indexOf(weekdayName.toLowerCase());
+        const currentWeekday = currentDate.getDay();
+        
+        let daysToAdd = targetWeekday - currentWeekday;
+        
+        const targetDate = new Date(currentDate);
+        targetDate.setDate(currentDate.getDate() + daysToAdd);
+        return targetDate;
+    }
+
+    getMonthIndex(monthName) {
+        const months = {
+            'january': 0, 'jan': 0,
+            'february': 1, 'feb': 1,
+            'march': 2, 'mar': 2,
+            'april': 3, 'apr': 3,
+            'may': 4,
+            'june': 5, 'jun': 5,
+            'july': 6, 'jul': 6,
+            'august': 7, 'aug': 7,
+            'september': 8, 'sep': 8,
+            'october': 9, 'oct': 9,
+            'november': 10, 'nov': 10,
+            'december': 11, 'dec': 11
+        };
+        
+        return months[monthName.toLowerCase()] || 0;
+    }
+
+    formatDateForDisplay(date) {
+        const options = { 
+            weekday: 'long', 
+            year: 'numeric', 
+            month: 'long', 
+            day: 'numeric' 
+        };
+        return date.toLocaleDateString('en-US', options);
+    }
+
+    isGreeting(query) {
+        const greetings = ['hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening'];
+        return greetings.some(greeting => query.includes(greeting));
+    }
+
+    isHelpRequest(query) {
+        return query.includes('help') || query.includes('what can you do') || query.includes('how to use');
+    }
+
+    isTimetableQuery(query) {
+        return query.includes('timetable') || query.includes('schedule') || query.includes('classes') || query.includes('class');
+    }
+
+    isAttendanceQuery(query) {
+        return query.includes('attendance') || query.includes('present') || query.includes('absent');
+    }
+
+    isMessMenuQuery(query) {
+        return query.includes('lunch') || query.includes('dinner') || query.includes('breakfast') || 
+               query.includes('food') || query.includes('menu') || query.includes('meal') || query.includes('mess')|| query.includes('snacks')|| query.includes('snack');
+    }
+
+    isEventsQuery(query) {
+        return query.includes('event') || query.includes('fest') || query.includes('function') || 
+               query.includes('program') || query.includes('activity');
+    }
+
+    isContactsQuery(query) {
+        return query.includes('contact') || query.includes('phone') || query.includes('number') || 
+               query.includes('call') || query.includes('department');
     }
 
     async handleTimetableQuery(query) {
-        console.log('[Handler] handleTimetableQuery', { query });
-        try {
-            const data = await this.fetchSheetData('timetable');
-            const headers = data[0];
-            const rows = data.slice(1);
-            console.log('[Handler] timetable rows', rows.length, 'headers', headers);
-
-            const rollNumber = this.extractRollNumber(query);
-            const day = this.extractDay(query);
-            console.log('[Handler] timetable filters', { rollNumber, day });
-
-            let filteredRows = rows;
-
-            if (rollNumber) {
-                filteredRows = filteredRows.filter(row => row[0] === rollNumber);
-            }
-
-            if (day) {
-                filteredRows = filteredRows.filter(row => row[1] && row[1].toLowerCase() === day);
-            }
-
-            console.log('[Handler] timetable filteredRows', filteredRows.length);
-
-            if (filteredRows.length === 0) {
-                const availableRolls = [...new Set(rows.map(row => row[0]).filter(Boolean))];
-                return rollNumber ? 
-                    `No timetable found for roll number ${rollNumber}. Available roll numbers: ${availableRolls.join(', ')}` :
-                    "No timetable data found. Please specify a roll number or click the Timetable button above.";
-            }
-
-            return this.formatTimetableResponse(filteredRows, rollNumber, day);
-        } catch (error) {
-            console.log('[Handler] handleTimetableQuery error', error);
-            return this.getErrorMessage(error);
+        if (!this.userRollNumber) {
+            return 'I need your roll number to show your timetable. Please tell me your roll number like "My roll number is B24035" or just type your roll number.';
         }
-    }
 
-    async handleAttendanceQuery(query) {
-        console.log('[Handler] handleAttendanceQuery', { query });
         try {
-            const data = await this.fetchSheetData('attendance');
-            const headers = data[0];
-            const rows = data.slice(1);
-            console.log('[Handler] attendance rows', rows.length, 'headers', headers);
-
-            const rollNumber = this.extractRollNumber(query);
-            let filteredRows = rows;
-
-            if (rollNumber) {
-                filteredRows = filteredRows.filter(row => row[0] === rollNumber);
+            const timeInfo = this.parseTimeExpression(query);
+            const data = await this.fetchSheetData('timetable');
+            
+            if (!data || data.length <= 1) {
+                return 'Sorry, I couldn\'t fetch the timetable data right now. Please try again later.';
             }
-
-            console.log('[Handler] attendance filteredRows', filteredRows.length);
-
-            if (filteredRows.length === 0) {
-                const availableRolls = [...new Set(rows.map(row => row[0]).filter(Boolean))];
-                return rollNumber ? 
-                    `No attendance found for roll number ${rollNumber}. Available roll numbers: ${availableRolls.join(', ')}` :
-                    "No attendance data found. Please specify a roll number or click the Attendance button above.";
+            
+            const userSchedule = data.filter(row => 
+                row[0] && row[0].toString().toUpperCase() === this.userRollNumber
+            );
+            
+            if (userSchedule.length === 0) {
+                return `No timetable found for roll number ${this.userRollNumber}. Please check if your roll number is correct.`;
             }
-
-            return this.formatAttendanceResponse(filteredRows, rollNumber);
+            
+            if (timeInfo && timeInfo.type === 'specific_date') {
+                const dayName = this.getDayName(timeInfo.date);
+                const daySchedule = userSchedule.filter(row => 
+                    row[1] && row[1].toLowerCase() === dayName.toLowerCase()
+                );
+                
+                if (daySchedule.length === 0) {
+                    return `No classes scheduled for ${this.formatDateForDisplay(timeInfo.date)}.`;
+                }
+                
+                return this.formatTimetableResponse(daySchedule, this.formatDateForDisplay(timeInfo.date));
+            }
+            
+            return this.formatTimetableResponse(userSchedule, 'this week');
         } catch (error) {
-            console.log('[Handler] handleAttendanceQuery error', error);
-            return this.getErrorMessage(error);
+            console.error('Error fetching timetable:', error);
+            return 'Sorry, I couldn\'t fetch your timetable right now. Please try again later.';
         }
     }
 
     async handleMessMenuQuery(query) {
-        console.log('[Handler] handleMessMenuQuery', { query });
         try {
-            const data = await this.fetchSheetData('mess_menu');
-            const headers = data[0];
-            const rows = data.slice(1);
-            console.log('[Handler] mess_menu rows', rows.length, 'headers', headers);
-
-            const today = this.getCurrentDay();
-            const day = this.extractDay(query) || (query.includes('today') ? today : null);
-            console.log('[Handler] mess_menu day resolved', { day, today });
-
-            if (day) {
-                const dayData = rows.find(row => row[0] && row[0].toLowerCase() === day);
-                if (dayData) {
-                    return this.formatDayMenu(dayData);
-                } else {
-                    return `Menu not found for ${day}. Available days: ${rows.map(row => row[0]).join(', ')}`;
-                }
+            const timeInfo = this.parseTimeExpression(query);
+            const mealTime = this.extractMealTime(query);
+            
+            let targetDate = this.currentDate;
+            let displayDate = 'today';
+            
+            if (timeInfo && timeInfo.type === 'specific_date') {
+                targetDate = timeInfo.date;
+                displayDate = this.formatDateForDisplay(targetDate);
             }
-
-            return this.formatFullMenu(rows);
+            
+            const dayName = this.getDayName(targetDate);
+            const data = await this.fetchSheetData('messmenu');
+            
+            // Handle case where API might fail or return no data
+            if (!data || data.length === 0) {
+                return this.getSampleMessMenuResponse(dayName, mealTime, displayDate);
+            }
+            
+            // Find menu for the requested day
+            const dayMenu = data.find(row => 
+                row && row[0] && row[0].toLowerCase() === dayName.toLowerCase()
+            );
+            
+            if (!dayMenu) {
+                return this.getSampleMessMenuResponse(dayName, mealTime, displayDate);
+            }
+            
+            return this.formatMessMenuResponse(dayMenu, displayDate, mealTime);
         } catch (error) {
-            console.log('[Handler] handleMessMenuQuery error', error);
-            return this.getErrorMessage(error);
+            console.error('Error fetching mess menu:', error);
+            const timeInfo = this.parseTimeExpression(query);
+            let targetDate = this.currentDate;
+            if (timeInfo && timeInfo.type === 'specific_date') {
+                targetDate = timeInfo.date;
+            }
+            const dayName = this.getDayName(targetDate);
+            const mealTime = this.extractMealTime(query);
+            const displayDate = this.formatDateForDisplay(targetDate);
+            return this.getSampleMessMenuResponse(dayName, mealTime, displayDate);
         }
+    }
+
+    getDayName(date) {
+        const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+        return days[date.getDay()];
     }
 
     async handleEventsQuery(query) {
-        console.log('[Handler] handleEventsQuery', { query });
         try {
+            const timeInfo = this.parseTimeExpression(query);
             const data = await this.fetchSheetData('events');
-            const headers = data[0];
-            const rows = data.slice(1);
-            console.log('[Handler] events rows', rows.length, 'headers', headers);
-
-            if (rows.length === 0) {
-                return "No events data found in the spreadsheet.";
+            
+            if (!data || data.length <= 1) {
+                return 'Sorry, I couldn\'t fetch events data right now. Please try again later.';
             }
-
-            return this.formatEventsResponse(rows);
+            
+            let filteredEvents = data.slice(1); // Remove header row
+            
+            if (timeInfo) {
+                filteredEvents = this.filterEventsByTimeInfo(filteredEvents, timeInfo);
+            }
+            
+            if (filteredEvents.length === 0) {
+                const timeDesc = timeInfo ? this.getTimeDescription(timeInfo) : '';
+                return timeDesc ? `No events found for ${timeDesc}.` : 'No upcoming events found.';
+            }
+            
+            const timeDesc = timeInfo ? this.getTimeDescription(timeInfo) : '';
+            return this.formatEventsResponse(filteredEvents, timeDesc);
         } catch (error) {
-            console.log('[Handler] handleEventsQuery error', error);
-            return this.getErrorMessage(error);
+            console.error('Error fetching events:', error);
+            return 'Sorry, I couldn\'t fetch events data right now. Please try again later.';
         }
     }
 
+    // Enhanced contact filtering for individual contacts
     async handleContactsQuery(query) {
-        console.log('[Handler] handleContactsQuery', { query });
         try {
             const data = await this.fetchSheetData('contacts');
-            const headers = data[0];
-            const rows = data.slice(1);
-            console.log('[Handler] contacts rows', rows.length, 'headers', headers);
+            
+            if (!data || data.length <= 1) {
+                return 'Sorry, I couldn\'t fetch contact information right now. Please try again later.';
+            }
+            
+            // Check for specific contact requests
+            const specificContact = this.findSpecificContact(query, data);
+            if (specificContact) {
+                return this.formatSpecificContactResponse(specificContact, query);
+            }
+            
+            return this.formatContactsResponse(data);
+        } catch (error) {
+            console.error('Error fetching contacts:', error);
+            return 'Sorry, I couldn\'t fetch contact information right now. Please try again later.';
+        }
+    }
 
-            const department = this.extractDepartment(query);
-            console.log('[Handler] contacts filter department', { department });
-
-            if (department) {
-                const contactData = rows.filter(row => 
-                    row[0] && row[0].toLowerCase().includes(department)
+    // Find specific individual contact
+    findSpecificContact(query, contactsData) {
+        const searchTerms = {
+            'principal': ['principal', 'principal office', 'principal contact', 'principal number'],
+            'medical': ['medical', 'medical room', 'medical contact', 'doctor', 'medical number', 'health'],
+            'hostel': ['hostel', 'hostel warden', 'warden', 'hostel contact', 'hostel number', 'accommodation'],
+            'library': ['library', 'librarian', 'library contact', 'library number'],
+            'sports': ['sports', 'sports department', 'sports contact', 'sports number', 'gym'],
+            'it': ['it', 'it department', 'computer', 'tech', 'technical'],
+            'accounts': ['accounts', 'accounts office', 'finance', 'fees'],
+            'admission': ['admission', 'admission office', 'admissions', 'enrollment']
+        };
+        
+        const queryLower = query.toLowerCase();
+        
+        // Find matching department
+        for (const [dept, terms] of Object.entries(searchTerms)) {
+            if (terms.some(term => queryLower.includes(term))) {
+                // Find contact in data
+                const contact = contactsData.slice(1).find(row => 
+                    row && row[0] && row[0].toLowerCase().includes(dept)
                 );
-                console.log('[Handler] contacts filteredRows', contactData.length);
-                if (contactData.length > 0) {
-                    return this.formatContactsResponse(contactData, `Contact for ${department}`);
-                } else {
-                    const availableDepts = rows.map(row => row[0]).join(', ');
-                    return `No contact found for "${department}". Available contacts: ${availableDepts}`;
+                
+                if (contact) {
+                    return { department: contact[0], number: contact[1], searchTerm: dept };
                 }
             }
-
-            return this.formatContactsResponse(rows, "All Contacts");
-        } catch (error) {
-            console.log('[Handler] handleContactsQuery error', error);
-            return this.getErrorMessage(error);
-        }
-    }
-
-    async handleSubjectsQuery(query) {
-        console.log('[Handler] handleSubjectsQuery', { query });
-        try {
-            const data = await this.fetchSheetData('subjects');
-            const headers = data[0];
-            const rows = data.slice(1);
-            console.log('[Handler] subjects rows', rows.length, 'headers', headers);
-
-            const rollNumber = this.extractRollNumber(query);
-            console.log('[Handler] subjects filter rollNumber', { rollNumber });
-
-            if (rollNumber) {
-                const subjectData = rows.filter(row => row[0] === rollNumber);
-                console.log('[Handler] subjects filteredRows', subjectData.length);
-                if (subjectData.length > 0) {
-                    return this.formatSubjectsResponse(subjectData, rollNumber);
-                } else {
-                    const availableRolls = [...new Set(rows.map(row => row[0]).filter(Boolean))];
-                    return `No subjects found for roll number ${rollNumber}. Available roll numbers: ${availableRolls.join(', ')}`;
-                }
-            }
-
-            return this.formatSubjectsResponse(rows, "All Subjects");
-        } catch (error) {
-            console.log('[Handler] handleSubjectsQuery error', error);
-            return this.getErrorMessage(error);
-        }
-    }
-
-    // Data extraction helpers
-    extractRollNumber(query) {
-        console.log('[Extract] extractRollNumber from', query);
-        const match = query.match(/\b[A-Za-z]\d{5}\b/);
-        const val = match ? match[0].toUpperCase() : null;
-        console.log('[Extract] extractRollNumber ->', val);
-        return val;
-    }
-
-    extractDay(query) {
-        console.log('[Extract] extractDay from', query);
-        const days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
-        const val = days.find(day => query.includes(day)) || null;
-        console.log('[Extract] extractDay ->', val);
-        return val;
-    }
-
-    extractDepartment(query) {
-        console.log('[Extract] extractDepartment from', query);
-        const departments = ['principal', 'admission', 'academic', 'hostel', 'library', 'medical', 'canteen', 'security', 'transport', 'placement'];
-        const val = departments.find(dept => query.includes(dept)) || null;
-        console.log('[Extract] extractDepartment ->', val);
-        return val;
-    }
-
-    getCurrentDay() {
-        const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-        const d = days[new Date().getDay()];
-        console.log('[Util] getCurrentDay ->', d);
-        return d;
-    }
-
-    // Response formatters
-    formatTimetableResponse(data, rollNumber, day) {
-        console.log('[Format] formatTimetableResponse', { rows: data.length, rollNumber, day });
-        const title = rollNumber ? 
-            `📅 Timetable for ${rollNumber}${day ? ` on ${day}` : ''}` :
-            '📅 Timetable Information';
-
-        let html = `<strong>${title}:</strong><br><br>`;
-        html += '<table class="data-table">';
-        html += '<tr><th>Day</th><th>Time</th><th>Subject</th><th>Room</th></tr>';
-        
-        data.forEach(row => {
-            html += `<tr><td>${row[1] || ''}</td><td>${row[2] || ''}</td><td>${row[3] || ''}</td><td>${row[4] || ''}</td></tr>`;
-        });
-        
-        html += '</table>';
-        
-        if (rollNumber) {
-            conversationState.lastRollNumber = rollNumber;
         }
         
-        html += this.getDataSourceFooter('timetable');
-        console.log('[Format] formatTimetableResponse -> html length', html.length);
-        return html;
+        return null;
     }
 
-    formatAttendanceResponse(data, rollNumber) {
-        console.log('[Format] formatAttendanceResponse', { rows: data.length, rollNumber });
-        const title = rollNumber ? `📊 Attendance for ${rollNumber}` : '📊 Attendance Information';
-        
-        let html = `<strong>${title}:</strong><br><br>`;
-        html += '<table class="data-table">';
-        html += '<tr><th>Subject</th><th>Attendance</th></tr>';
-        
-        data.forEach(row => {
-            const attendanceValue = row[2] || '';
-            const attendanceClass = this.getAttendanceClass(attendanceValue);
-            html += `<tr><td>${row[1] || ''}</td><td class="${attendanceClass}">${attendanceValue}</td></tr>`;
-        });
-        
-        html += '</table>';
-        
-        if (rollNumber) {
-            conversationState.lastRollNumber = rollNumber;
-        }
-        
-        html += this.getDataSourceFooter('attendance');
-        console.log('[Format] formatAttendanceResponse -> html length', html.length);
-        return html;
+    formatSpecificContactResponse(contact, originalQuery) {
+        return `<div class="event-card">
+            <h4>📞 ${contact.department}</h4>
+            <p><strong>Contact Number:</strong> <a href="tel:${contact.number}" target="_blank">${contact.number}</a></p>
+            <p><em>You can call this number for any queries related to ${contact.department.toLowerCase()}.</em></p>
+        </div>`;
     }
 
-    getAttendanceClass(attendance) {
-        console.log('[Format] getAttendanceClass', { attendance });
-        if (typeof attendance === 'string' && attendance.includes('%')) {
-            const percentage = parseInt(attendance);
-            if (percentage >= 75) return 'status--success';
-            if (percentage >= 60) return 'status--warning';
-            return 'status--error';
+    filterEventsByTimeInfo(events, timeInfo) {
+        if (timeInfo.type === 'specific_date') {
+            const targetDateStr = timeInfo.date.toISOString().split('T')[0];
+            return events.filter(event => {
+                const eventDate = event[1];
+                return eventDate && eventDate === targetDateStr.replace(/-/g, '-');
+            });
         }
+
+        if (timeInfo.type === 'month') {
+            const targetYear = timeInfo.year;
+            const targetMonth = timeInfo.month + 1; // Convert to 1-based
+
+            return events.filter(event => {
+                const eventDate = event[1];
+                if (!eventDate) return false;
+
+                const eventYear = new Date(eventDate).getFullYear();
+                const eventMonth = new Date(eventDate).getMonth() + 1;
+
+                return eventYear === targetYear && eventMonth === targetMonth;
+            });
+        }
+
+        if (timeInfo.type === 'date_range') {
+            const startDate = timeInfo.startDate;
+            const endDate = timeInfo.endDate;
+
+            return events.filter(event => {
+                const eventDateStr = event[1];
+                if (!eventDateStr) return false;
+
+                const eventDate = new Date(eventDateStr);
+                return eventDate >= startDate && eventDate <= endDate;
+            });
+        }
+
+        return events;
+    }
+
+    getTimeDescription(timeInfo) {
+        if (timeInfo.type === 'specific_date') {
+            return this.formatDateForDisplay(timeInfo.date);
+        }
+        
+        if (timeInfo.type === 'date_range') {
+            return timeInfo.period;
+        }
+        
+        if (timeInfo.type === 'month') {
+            const monthNames = [
+                'January', 'February', 'March', 'April', 'May', 'June',
+                'July', 'August', 'September', 'October', 'November', 'December'
+            ];
+            return `${monthNames[timeInfo.month]} ${timeInfo.year}`;
+        }
+        
         return '';
     }
 
-    formatDayMenu(dayData) {
-        console.log('[Format] formatDayMenu', { day: dayData[0] });
-        let html = `<strong>🍽️ Menu for ${dayData[0]}:</strong><br><br>`;
-        html += `🌅 <strong>Breakfast:</strong> ${dayData[1] || 'Not available'}<br><br>`;
-        html += `🍽️ <strong>Lunch:</strong> ${dayData[2] || 'Not available'}<br><br>`;
-        html += `☕ <strong>Snacks:</strong> ${dayData[3] || 'Not available'}<br><br>`;
-        html += `🌙 <strong>Dinner:</strong> ${dayData[4] || 'Not available'}`;
-        html += this.getDataSourceFooter('mess_menu');
-        console.log('[Format] formatDayMenu -> html length', html.length);
-        return html;
-    }
-
-    formatFullMenu(data) {
-        console.log('[Format] formatFullMenu', { rows: data.length });
-        let html = '<strong>🍽️ Weekly Mess Menu:</strong><br><br>';
-        html += '<table class="data-table">';
-        html += '<tr><th>Day</th><th>Breakfast</th><th>Lunch</th><th>Snacks</th><th>Dinner</th></tr>';
+    async fetchSheetData(sheetName) {
+        const range = `${this.sheets[sheetName]}!A:Z`;
+        const url = `https://sheets.googleapis.com/v4/spreadsheets/${this.sheetId}/values/${range}?key=${this.apiKey}`;
         
-        data.forEach(row => {
-            html += `<tr><td><strong>${row[0] || ''}</strong></td><td>${row[1] || ''}</td><td>${row[2] || ''}</td><td>${row[3] || ''}</td><td>${row[4] || ''}</td></tr>`;
-        });
+        const response = await fetch(url);
         
-        html += '</table>';
-        html += this.getDataSourceFooter('mess_menu');
-        console.log('[Format] formatFullMenu -> html length', html.length);
-        return html;
-    }
-
-    formatEventsResponse(data) {
-        console.log('[Format] formatEventsResponse', { rows: data.length });
-        let html = '<strong>🎉 Upcoming Events:</strong><br><br>';
-        html += '<table class="data-table">';
-        html += '<tr><th>Event</th><th>Date</th><th>Time</th><th>Club</th><th>Venue</th></tr>';
-        
-        data.forEach(row => {
-            html += `<tr><td>${row[0] || ''}</td><td>${row[1] || ''}</td><td>${row[2] || ''}</td><td>${row[3] || ''}</td><td>${row[4] || ''}</td></tr>`;
-        });
-        
-        html += '</table>';
-        html += this.getDataSourceFooter('events');
-        console.log('[Format] formatEventsResponse -> html length', html.length);
-        return html;
-    }
-
-    formatContactsResponse(data, title) {
-        console.log('[Format] formatContactsResponse', { rows: data.length, title });
-        let html = `<strong>📞 ${title}:</strong><br><br>`;
-        html += '<table class="data-table">';
-        html += '<tr><th>Department</th><th>Contact Number</th></tr>';
-        
-        data.forEach(row => {
-            const phoneNumber = row[1] || '';
-            html += `<tr><td>${row[0] || ''}</td><td><a href="tel:${phoneNumber}" target="_blank">${phoneNumber}</a></td></tr>`;
-        });
-        
-        html += '</table>';
-        html += this.getDataSourceFooter('contacts');
-        console.log('[Format] formatContactsResponse -> html length', html.length);
-        return html;
-    }
-
-    formatSubjectsResponse(data, rollNumber) {
-        console.log('[Format] formatSubjectsResponse', { rows: data.length, rollNumber });
-        const title = rollNumber ? `📚 Subjects for ${rollNumber}` : '📚 All Subjects';
-        
-        let html = `<strong>${title}:</strong><br><br>`;
-        
-        if (rollNumber) {
-            html += '<ul>';
-            data.forEach(row => {
-                html += `<li>📚 ${row[1] || ''}</li>`;
-            });
-            html += '</ul>';
-            conversationState.lastRollNumber = rollNumber;
-        } else {
-            html += '<table class="data-table">';
-            html += '<tr><th>Roll Number</th><th>Subject</th></tr>';
-            
-            data.forEach(row => {
-                html += `<tr><td>${row[0] || ''}</td><td>${row[1] || ''}</td></tr>`;
-            });
-            
-            html += '</table>';
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
         }
         
-        html += this.getDataSourceFooter('subjects');
-        console.log('[Format] formatSubjectsResponse -> html length', html.length);
+        const data = await response.json();
+        
+        if (data.error) {
+            throw new Error(data.error.message);
+        }
+        
+        return data.values || [];
+    }
+
+    extractMealTime(query) {
+        if (query.includes('breakfast')) return 'breakfast';
+        if (query.includes('lunch')) return 'lunch';
+        if (query.includes('dinner') || query.includes('supper')) return 'dinner';
+        if (query.includes('snack')) return 'snacks';
+        return null;
+    }
+
+    getSampleMessMenuResponse(dayName, mealTime, displayDate) {
+        const sampleMenus = {
+            'monday': ['Monday', 'Poha, Tea', 'Rice, Dal, Sabji', 'Samosa, Tea', 'Roti, Paneer'],
+            'tuesday': ['Tuesday', 'Upma, Coffee', 'Rice, Rajma', 'Pakora, Tea', 'Roti, Dal'],
+            'wednesday': ['Wednesday', 'Idli, Coffee', 'Rice, Chicken Curry', 'Bread Pakora, Tea', 'Roti, Aloo Sabji'],
+            'thursday': ['Thursday', 'Paratha, Curd', 'Rice, Fish Curry', 'Samosa, Tea', 'Roti, Dal Fry'],
+            'friday': ['Friday', 'Dosa, Coffee', 'Biryani, Raita', 'Vada Pav, Tea', 'Roti, Paneer Masala'],
+            'saturday': ['Saturday', 'Poha, Tea', 'Rice, Mutton Curry', 'Bhel Puri, Tea', 'Roti, Mixed Veg'],
+            'sunday': ['Sunday', 'Chole Bhature', 'Special Thali', 'Pav Bhaji', 'Roti, Dal Makhani']
+        };
+
+        const dayKey = dayName.toLowerCase();
+        const menu = sampleMenus[dayKey] || sampleMenus['monday'];
+        
+        return this.formatMessMenuResponse(menu, displayDate, mealTime);
+    }
+
+    async handleAttendanceQuery(query) {
+        if (!this.userRollNumber) {
+            return 'I need your roll number to check your attendance. Please tell me your roll number like "My roll number is B24035" or just type your roll number.';
+        }
+
+        try {
+            const [attendanceData, subjectsData] = await Promise.all([
+                this.fetchSheetData('attendance'),
+                this.fetchSheetData('subjects')
+            ]);
+
+            if (!attendanceData || attendanceData.length <= 1) {
+                return 'Sorry, I couldn\'t fetch attendance data right now. Please try again later.';
+            }
+
+            const subjects = subjectsData.flat();
+            const subject = this.extractSubject(query, subjects);
+
+            let userAttendance = attendanceData.filter(row =>
+                row[0] && row[0].toString().toUpperCase() === this.userRollNumber
+            );
+
+            if (userAttendance.length === 0) {
+                return `No attendance data found for roll number ${this.userRollNumber}.`;
+            }
+
+            if (subject) {
+                userAttendance = userAttendance.filter(row =>
+                    row[1] && row[1].toLowerCase() === subject.toLowerCase()
+                );
+
+                if (userAttendance.length === 0) {
+                    return `No attendance data found for ${subject}.`;
+                }
+            }
+
+            if (query.includes('enough attendance')) {
+                return this.checkEnoughAttendance(userAttendance, subject);
+            }
+
+            return this.formatAttendanceResponse(userAttendance, subject);
+        } catch (error) {
+            console.error('Error fetching attendance:', error);
+            return 'Sorry, I couldn\'t fetch your attendance right now. Please try again later.';
+        }
+    }
+
+    extractSubject(query, subjects) {
+        const lowerQuery = query.toLowerCase();
+        for (const subject of subjects) {
+            if (lowerQuery.includes(subject.toLowerCase())) {
+                return subject;
+            }
+        }
+        return null;
+    }
+
+    checkEnoughAttendance(attendance, subject) {
+        const attendanceThreshold = 75;
+        let response = '';
+
+        if (subject) {
+            const subjectAttendance = attendance[0];
+            const percentage = parseInt(subjectAttendance[2]) || 0;
+            if (percentage >= attendanceThreshold) {
+                response = `Yes, you have ${percentage}% attendance in ${subject}, which is above the required ${attendanceThreshold}%.`;
+            } else {
+                response = `No, you have only ${percentage}% attendance in ${subject}, which is below the required ${attendanceThreshold}%.`;
+            }
+        } else {
+            const averageAttendance = attendance.reduce((sum, row) => sum + (parseInt(row[2]) || 0), 0) / attendance.length;
+            if (averageAttendance >= attendanceThreshold) {
+                response = `Yes, your overall average attendance is ${averageAttendance.toFixed(1)}%, which is good.`;
+            } else {
+                response = `No, your overall average attendance is ${averageAttendance.toFixed(1)}%, which is below the required ${attendanceThreshold}%.`;
+            }
+        }
+        return response;
+    }
+
+    formatTimetableResponse(schedule, period) {
+        if (!schedule || schedule.length === 0) {
+            return `No classes found for ${period}.`;
+        }
+        
+        let html = `<p><strong>📅 Your timetable for ${period}:</strong></p>`;
+        html += '<table class="data-table">';
+        html += '<thead><tr><th>Day</th><th>Time</th><th>Subject</th><th>Room</th></tr></thead>';
+        html += '<tbody>';
+        
+        schedule.forEach(row => {
+            html += `<tr>
+                <td>${row[1] || 'N/A'}</td>
+                <td>${row[2] || 'N/A'}</td>
+                <td>${row[3] || 'N/A'}</td>
+                <td>${row[4] || 'N/A'}</td>
+            </tr>`;
+        });
+        
+        html += '</tbody></table>';
         return html;
     }
 
-    getDataSourceFooter(sheetName) {
-        const lastUpdated = this.cache.getLastUpdated(sheetName);
-        const timeStr = lastUpdated ? new Date(lastUpdated).toLocaleTimeString() : 'Unknown';
-        const footer = `<div class="data-source">📊 Data from Google Sheets • Last updated: ${timeStr}</div>`;
-        console.log('[Format] getDataSourceFooter', { sheetName, timeStr });
-        return footer;
+    formatAttendanceResponse(attendance, subject) {
+        let html = `<p><strong>📊 Your attendance summary${subject ? ` for ${subject}` : ''}:</strong></p>`;
+        html += '<table class="data-table">';
+        html += '<thead><tr><th>Subject</th><th>Attendance %</th><th>Status</th></tr></thead>';
+        html += '<tbody>';
+        
+        attendance.forEach(row => {
+            const percentage = parseInt(row[2]) || 0;
+            let statusClass = 'attendance-low';
+            let status = 'Needs Improvement';
+            
+            if (percentage >= 75) {
+                statusClass = 'attendance-high';
+                status = 'Good';
+            } else if (percentage >= 60) {
+                statusClass = 'attendance-medium';
+                status = 'Average';
+            }
+            
+            html += `<tr>
+                <td>${row[1] || 'N/A'}</td>
+                <td class="${statusClass}">${percentage}%</td>
+                <td class="${statusClass}">${status}</td>
+            </tr>`;
+        });
+        
+        html += '</tbody></table>';
+        
+        const averageAttendance = attendance.reduce((sum, row) => sum + (parseInt(row[2]) || 0), 0) / attendance.length;
+        html += `<p><strong>Overall Average:</strong> <span class="${averageAttendance >= 75 ? 'attendance-high' : averageAttendance >= 60 ? 'attendance-medium' : 'attendance-low'}">${averageAttendance.toFixed(1)}%</span></p>`;
+        
+        return html;
     }
 
-    // UI helpers
-    addMessage(content, sender) {
-        console.log('[UI] addMessage', { sender, contentLength: (content || '').length });
-        if (!this.elements.chatMessages) return;
+    formatMessMenuResponse(menu, displayDate, mealTime) {
+        let html = `<p><strong>🍽️ Mess menu for ${displayDate}:</strong></p>`;
+        
+        if (mealTime) {
+            const mealIndex = {
+                'breakfast': 1,
+                'lunch': 2,
+                'snacks': 3,
+                'dinner': 4
+            };
+            
+            const mealData = menu[mealIndex[mealTime]] || 'Not available';
+            html += `<div class="event-card">
+                <h4>${mealTime.charAt(0).toUpperCase() + mealTime.slice(1)}</h4>
+                <p>${mealData}</p>
+            </div>`;
+        } else {
+            const meals = ['Breakfast', 'Lunch', 'Snacks', 'Dinner'];
+            meals.forEach((meal, index) => {
+                html += `<div class="event-card">
+                    <h4>${meal}</h4>
+                    <p>${menu[index + 1] || 'Not available'}</p>
+                </div>`;
+            });
+        }
+        
+        return html;
+    }
 
+    formatEventsResponse(events, timeFrame) {
+        let html = `<p><strong>🎉 ${timeFrame ? `Events for ${timeFrame}` : 'Upcoming Events'}:</strong></p>`;
+        
+        events.forEach(event => {
+            html += `<div class="event-card">
+                <h4>${event[0] || 'Event'}</h4>
+                <p><strong>Date:</strong> ${event[1] || 'TBD'}</p>
+                <p><strong>Time:</strong> ${event[2] || 'TBD'}</p>
+                <p><strong>Venue:</strong> ${event[3] || 'TBD'}</p>
+                <p><strong>Organizer:</strong> ${event[4] || 'N/A'}</p>
+            </div>`;
+        });
+        
+        return html;
+    }
+
+    formatContactsResponse(contacts) {
+        let html = '<p><strong>📞 Department Contacts:</strong></p>';
+        html += '<table class="data-table">';
+        html += '<thead><tr><th>Department</th><th>Contact Number</th></tr></thead>';
+        html += '<tbody>';
+        
+        contacts.slice(1).forEach(row => {
+            html += `<tr>
+                <td>${row[0] || 'N/A'}</td>
+                <td><a href="tel:${row[1]}" target="_blank">${row[1] || 'N/A'}</a></td>
+            </tr>`;
+        });
+        
+        html += '</tbody></table>';
+        return html;
+    }
+
+    getGreetingResponse() {
+        const greetings = [
+            "Hello! How can I help you with your college information today?",
+            "Hi there! I'm here to help with your timetable, attendance, mess menu, and more!",
+            "Hey! What would you like to know about college today?",
+            "Good to see you! Ask me anything about your classes, attendance, or campus events."
+        ];
+        
+        return greetings[Math.floor(Math.random() * greetings.length)];
+    }
+
+    getHelpResponse() {
+        return `<p><strong>Here's what I can help you with:</strong></p>
+        <ul>
+            <li><strong>📅 Timetables:</strong> "Show my timetable", "Classes tomorrow", "Classes day after tomorrow", "Next Monday classes"</li>
+            <li><strong>📊 Attendance:</strong> "My attendance", "Show my attendance summary"</li>
+            <li><strong>🍽️ Mess Menu:</strong> "What's for lunch today?", "Dinner day after tomorrow", "Menu next Monday"</li>
+            <li><strong>🎉 Events:</strong> "Events today", "Events next week", "Events in January"</li>
+            <li><strong>📞 Contacts:</strong> "Principal contact", "Medical contact", "Hostel warden number"</li>
+        </ul>
+        <p><strong>Time expressions I understand:</strong></p>
+        <ul>
+            <li>Today, tomorrow, day after tomorrow</li>
+            <li>Next Monday, this Friday, next week</li>
+            <li>On 25th next month, events in January</li>
+            <li>In 2 days, 2 days later</li>
+        </ul>
+        <p><strong>Tips:</strong></p>
+        <ul>
+            <li>Just type your roll number (e.g., "B24035") to save it</li>
+            <li>Use natural language: "What classes do I have day after tomorrow?"</li>
+            <li>Ask for specific contacts: "Principal contact", "Medical number"</li>
+        </ul>`;
+    }
+
+    getDefaultResponse(query) {
+        return `I'm not sure how to help with "${query}". Try asking me about:
+        <ul>
+            <li>Your class timetable or schedule</li>
+            <li>Attendance records</li>
+            <li>Mess menu for meals</li>
+            <li>Campus events and activities</li>
+            <li>Department contact information</li>
+        </ul>
+        <p>You can also click on the quick action buttons above for common requests!</p>`;
+    }
+
+    addMessage(content, sender) {
+        const messagesContainer = document.getElementById('chatMessages');
         const messageDiv = document.createElement('div');
         messageDiv.className = `message ${sender}-message`;
-
+        
         const avatar = document.createElement('div');
         avatar.className = 'message-avatar';
-        avatar.textContent = sender === 'user' ? '👤' : '🤖';
-
+        avatar.textContent = sender === 'bot' ? '🤖' : '👤';
+        
         const messageContent = document.createElement('div');
         messageContent.className = 'message-content';
-
-        const messageBubble = document.createElement('div');
-        messageBubble.className = 'message-bubble';
-        messageBubble.innerHTML = content;
-
-        const messageTime = document.createElement('div');
-        messageTime.className = 'message-time';
-        messageTime.textContent = this.getCurrentTime();
-
-        messageContent.appendChild(messageBubble);
-        messageContent.appendChild(messageTime);
+        messageContent.innerHTML = content;
+        
         messageDiv.appendChild(avatar);
         messageDiv.appendChild(messageContent);
-
-        this.elements.chatMessages.appendChild(messageDiv);
-        this.scrollToBottom();
+        
+        messagesContainer.appendChild(messageDiv);
+        messagesContainer.scrollTop = messagesContainer.scrollHeight;
     }
 
     showTypingIndicator() {
-        console.log('[UI] showTypingIndicator');
-        if (this.elements.typingIndicator) {
-            this.elements.typingIndicator.classList.add('show');
-            this.scrollToBottom();
-        }
+        const indicator = document.getElementById('typingIndicator');
+        indicator.classList.add('show');
+        this.isTyping = true;
     }
 
     hideTypingIndicator() {
-        console.log('[UI] hideTypingIndicator');
-        if (this.elements.typingIndicator) {
-            this.elements.typingIndicator.classList.remove('show');
-        }
-    }
-
-    scrollToBottom() {
-        if (this.elements.chatMessages) {
-            this.elements.chatMessages.scrollTop = this.elements.chatMessages.scrollHeight;
-            console.log('[UI] scrollToBottom');
-        }
-    }
-
-    getCurrentTime() {
-        const t = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-        console.log('[Util] getCurrentTime ->', t);
-        return t;
-    }
-
-    updateStatus(type, message) {
-        console.log('[UI] updateStatus', { type, message });
-        const statusDot = this.elements.apiStatus?.querySelector('.status-dot');
-        const statusText = this.elements.statusText;
-
-        if (statusDot && statusText) {
-            statusDot.className = `status-dot ${type}`;
-            statusText.textContent = message;
-        }
-    }
-
-    updateConnectionStatus() {
-        console.log('[UI] updateConnectionStatus', { isOnline: this.isOnline, apiConnected: this.apiConnected });
-        if (!this.isOnline) {
-            this.updateStatus('error', 'Offline');
-        } else if (this.apiConnected) {
-            this.updateStatus('connected', 'Connected');
-        } else {
-            this.updateStatus('connecting', 'Connecting...');
-        }
-    }
-
-    updateCacheInfo() {
-        console.log('[UI] updateCacheInfo');
-        if (this.elements.lastUpdated) {
-            const now = new Date().toLocaleTimeString();
-            this.elements.lastUpdated.textContent = now;
-        }
-    }
-
-    async refreshData() {
-        console.log('[Chatbot] refreshData start');
-        if (!this.elements.refreshBtn) return;
-
-        this.elements.refreshBtn.disabled = true;
-        this.elements.refreshBtn.classList.add('loading');
-
-        try {
-            // Clear cache
-            this.cache.clear();
-            this.updateStatus('connecting', 'Refreshing data...');
-
-            // Test connection with a simple request
-            await this.fetchSheetData('timetable', false);
-            
-            this.updateStatus('connected', 'Data refreshed');
-            this.updateCacheInfo();
-            this.addMessage('✅ Data refreshed successfully! All information is now up to date.', 'bot');
-            
-        } catch (error) {
-            this.updateStatus('error', 'Refresh failed');
-            this.addMessage(this.getErrorMessage(error), 'bot');
-        } finally {
-            this.elements.refreshBtn.disabled = false;
-            this.elements.refreshBtn.classList.remove('loading');
-            console.log('[Chatbot] refreshData end');
-        }
-    }
-
-    restartChatbot() {
-        console.log('[Chatbot] restartChatbot start');
-                 // 1) Reset conversation state
-        conversationState = {
-            waitingFor: null,
-            pendingAction: null,
-            lastRollNumber: null
-        };
-                 // 2) Clear cache
-        this.cache?.clear();
-                 // 3) Reset input placeholder/value
-        if (this.elements?.messageInput) {
-            this.elements.messageInput.value = '';
-            this.elements.messageInput.placeholder = 'Type your message here.';
-        }
-                 // 4) Clear chat messages
-        if (this.elements?.chatMessages) {
-           this.elements.chatMessages.innerHTML = '';
-        }
-                 // 5) Refresh status widgets (keeps status dot/text consistent)
-        this.updateConnectionStatus();
-        this.updateCacheInfo?.();
-        console.log('[Chatbot] restartChatbot end');
-        // This text will be added by executeAction after the clearing is done
-        return '🔄 Chat reset. You can use the buttons below or type "help".';
-    }
-
-    
-    getErrorMessage(error) {
-        console.log('[Chatbot] getErrorMessage', { message: error?.message });
-        const baseMessage = '❌ <strong>Error:</strong> ';
-        
-        if (!this.isOnline) {
-            return baseMessage + 'No internet connection. Please check your network and try again.';
-        }
-
-        if (error.message.includes('403')) {
-            return baseMessage + 'Access denied. Please check your API key permissions and spreadsheet sharing settings.';
-        }
-
-        if (error.message.includes('404')) {
-            return baseMessage + 'Spreadsheet or sheet not found. Please verify your spreadsheet ID and sheet names.';
-        }
-
-        if (error.message.includes('429')) {
-            return baseMessage + 'API rate limit exceeded. Please try again in a few minutes.';
-        }
-
-        return baseMessage + (error.message || 'An unexpected error occurred. Please try again.');
-    }
-
-    getHelpMessage() {
-        console.log('[Chatbot] getHelpMessage');
-        return `<strong>🤖 College ChatBot Help:</strong><br><br>
-            <strong>🚀 Quick Shortcuts:</strong><br>
-            Use the buttons above for instant access to:<br>
-            • 📅 Timetable (requires roll number)<br>
-            • 📊 Attendance (requires roll number)<br>
-            • 🍽️ Mess Menu<br>
-            • 🎉 Events<br>
-            • 📞 Contacts<br>
-            • 📚 Subjects<br><br>
-            <strong>💬 Natural Language Queries:</strong><br>
-            • "What's my timetable?" or "Show timetable for 21CS001"<br>
-            • "What's my attendance?" or "Show attendance for 21CS001"<br>
-            • "What's today's menu?" or "Show mess menu"<br>
-            • "What are upcoming events?" or "Show events"<br>
-            • "Show contacts" or "What's the number for library?"<br>
-            • "What subjects does 21CS001 have?"<br><br>
-            <strong>🔑 Roll Number Format:</strong><br>
-            Examples: 21CS001, 22ME005, 20EC003<br><br>
-            <strong>🔄 Data Management:</strong><br>
-            • Click the refresh button to update data<br>
-            • Data is cached for 5 minutes for better performance<br>
-            ${conversationState.lastRollNumber ? `• Last used roll number: ${conversationState.lastRollNumber}` : ''}<br><br>
-            <strong>💡 Features:</strong><br>
-            • ✅ Real-time Google Sheets integration<br>
-            • ⚡ Smart caching for faster responses<br>
-            • 🔄 Automatic retry on failures<br>
-            • 🌐 Online/offline detection<br>
-            • 🔑 Roll number memory for quick access<br><br>
-            Just click the shortcuts or ask me naturally - I'll understand! 😊`;
-    }
-
-    getDefaultResponse() {
-        console.log('[Chatbot] getDefaultResponse');
-        const suggestions = [
-            "I'm not sure I understand that. Try using the quick shortcuts above or asking about:<br>• Timetables (e.g., 'show timetable for 21CS001')<br>• Attendance<br>• Mess menu<br>• Events<br>• Contacts<br>• Subjects<br><br>Type 'help' for more examples!",
-            "Could you rephrase that? Use the colorful buttons above for quick access, or try asking about college information like schedules, menus, and events. Type 'help' to see what I can do!",
-            "Hmm, I didn't quite catch that. Try the quick shortcuts above or one of these:<br>• 'What's today's menu?'<br>• 'Show timetable for 21CS001'<br>• 'What are upcoming events?'<br>• 'Show contacts'",
-            "I'm not sure about that query. Use the shortcut buttons above for instant access, or I can help you with live data from Google Sheets:<br>📅 Timetables<br>📊 Attendance<br>🍽️ Mess Menu<br>🎉 Events<br>📞 Contacts<br>📚 Subjects<br><br>What would you like to know?"
-        ];
-        
-        const pick = suggestions[Math.floor(Math.random() * suggestions.length)];
-        console.log('[Chatbot] getDefaultResponse -> picked index', suggestions.indexOf(pick));
-        return pick;
+        const indicator = document.getElementById('typingIndicator');
+        indicator.classList.remove('show');
+        this.isTyping = false;
     }
 }
 
-// Initialize chatbot when DOM is loaded
-(function() {
-    'use strict';
-    console.log('[Bootstrap] IIFE start');
-    
-    function initializeChatbot() {
-        console.log('[Bootstrap] initializeChatbot called');
-        try {
-            window.chatbot = new CollegeChatbot();
-            console.log('✅ College Chatbot initialized successfully');
-        } catch (error) {
-            console.error('❌ Failed to initialize chatbot:', error);
-        }
-    }
-
-    if (document.readyState === 'loading') {
-        console.log('[Bootstrap] document in loading state, attaching DOMContentLoaded');
-        document.addEventListener('DOMContentLoaded', initializeChatbot);
-    } else {
-        console.log('[Bootstrap] document ready, initializing immediately');
-        initializeChatbot();
-    }
-    console.log('[Bootstrap] IIFE end');
-})();
-
-
+// Initialize the chatbot when the DOM is loaded
+document.addEventListener('DOMContentLoaded', () => {
+    new CollegeAssistant();
+});
